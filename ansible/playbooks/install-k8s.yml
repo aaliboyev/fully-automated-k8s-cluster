@@ -1,0 +1,165 @@
+---
+# =============================================================================
+# Install Kubernetes components (kubeadm, kubelet, kubectl)
+# Usage: ansible-playbook -i inventory.ini playbooks/install-k8s.yml
+#        ansible-playbook -i inventory.ini playbooks/install-k8s.yml --limit n1,n2
+# =============================================================================
+- name: Install Kubernetes components
+  hosts: k8s
+  become: yes
+  gather_facts: no
+
+  tasks:
+    # -------------------------------------------------------------------------
+    # Install Longhorn prerequisites
+    # -------------------------------------------------------------------------
+    - name: Install Longhorn required packages
+      apt:
+        name:
+          - util-linux
+          - coreutils
+          - gawk
+          - open-iscsi
+          - nfs-common
+          - jq
+          - cryptsetup
+          - dmsetup
+          - multipath-tools
+        state: present
+        update_cache: yes
+
+    - name: Ensure required kernel modules are loaded
+      modprobe:
+        name: "{{ item }}"
+        state: present
+      loop:
+        - iscsi_tcp
+        - nfs
+        - dm_crypt
+
+    - name: Persist kernel modules across reboots
+      lineinfile:
+        path: /etc/modules
+        line: "{{ item }}"
+        create: yes
+      loop:
+        - iscsi_tcp
+        - nfs
+        - dm_crypt
+
+    - name: Enable and start iscsid service
+      systemd:
+        name: iscsid
+        enabled: yes
+        state: started
+
+    # -------------------------------------------------------------------------
+    # Install longhornctl for preflight checks
+    # -------------------------------------------------------------------------
+    - name: Check if longhornctl is installed
+      command: which longhornctl
+      register: longhornctl_check
+      failed_when: false
+      changed_when: false
+
+    - name: Determine architecture
+      command: uname -m
+      register: arch
+      changed_when: false
+      when: longhornctl_check.rc != 0
+
+    - name: Set architecture variable
+      set_fact:
+        longhorn_arch: "{{ 'arm64' if arch.stdout == 'aarch64' else 'amd64' }}"
+      when: longhornctl_check.rc != 0
+
+    - name: Download longhornctl
+      get_url:
+        url: "https://github.com/longhorn/cli/releases/download/{{ longhorn_cli_version }}/longhornctl-linux-{{ longhorn_arch }}"
+        dest: /tmp/longhornctl
+        mode: '0755'
+      when: longhornctl_check.rc != 0
+
+    - name: Install longhornctl
+      command: install /tmp/longhornctl /usr/local/bin/longhornctl
+      when: longhornctl_check.rc != 0
+
+    # -------------------------------------------------------------------------
+    # Install Kubernetes components
+    # -------------------------------------------------------------------------
+    - name: Create apt keyrings directory
+      file:
+        path: /etc/apt/keyrings
+        state: directory
+        mode: '0755'
+
+    - name: Check if Kubernetes apt key exists
+      stat:
+        path: /etc/apt/keyrings/kubernetes-apt-keyring.gpg
+      register: k8s_apt_key
+
+    - name: Download Kubernetes apt key
+      shell: >
+        curl -fsSL "https://pkgs.k8s.io/core:/stable:/{{ kubernetes_version }}/deb/Release.key" |
+        gpg --dearmor -o /etc/apt/keyrings/kubernetes-apt-keyring.gpg
+      when: not k8s_apt_key.stat.exists
+
+    - name: Add Kubernetes apt repository
+      copy:
+        dest: /etc/apt/sources.list.d/kubernetes.list
+        content: |
+          deb [signed-by=/etc/apt/keyrings/kubernetes-apt-keyring.gpg] https://pkgs.k8s.io/core:/stable:/{{ kubernetes_version }}/deb/ /
+        mode: '0644'
+      register: k8s_repo
+
+    - name: Update apt cache
+      apt:
+        update_cache: yes
+      when: k8s_repo.changed or not k8s_apt_key.stat.exists
+
+    - name: Install kubelet, kubeadm, kubectl
+      apt:
+        name:
+          - kubelet
+          - kubeadm
+          - kubectl
+        state: present
+
+    - name: Hold Kubernetes packages at current version
+      dpkg_selections:
+        name: "{{ item }}"
+        selection: hold
+      loop:
+        - kubelet
+        - kubeadm
+        - kubectl
+
+    - name: Enable kubelet service
+      systemd:
+        name: kubelet
+        enabled: yes
+        state: started
+      failed_when: false
+
+    - name: Get kubeadm version
+      command: kubeadm version -o short
+      register: kubeadm_version
+      changed_when: false
+
+    - name: Get kubelet version
+      command: kubelet --version
+      register: kubelet_version
+      changed_when: false
+
+    - name: Get kubectl version
+      command: kubectl version --client -o yaml
+      register: kubectl_version
+      changed_when: false
+      failed_when: false
+
+    - name: Display installed versions
+      debug:
+        msg:
+          - "kubeadm: {{ kubeadm_version.stdout }}"
+          - "kubelet: {{ kubelet_version.stdout }}"
+          - "kubectl: installed"

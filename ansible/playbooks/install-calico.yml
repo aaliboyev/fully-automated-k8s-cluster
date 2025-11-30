@@ -1,0 +1,77 @@
+---
+# =============================================================================
+# Install Calico CNI using Tigera Operator with iptables dataplane
+# =============================================================================
+- name: Install Calico CNI
+  hosts: control_plane[0]
+  become: yes
+  gather_facts: no
+
+  tasks:
+    # -------------------------------------------------------------------------
+    # Install Tigera Operator CRDs
+    # -------------------------------------------------------------------------
+    - name: Check if Tigera Operator CRDs are installed
+      command: kubectl get crd installations.operator.tigera.io
+      register: tigera_crds_check
+      failed_when: false
+      changed_when: false
+
+    - name: Install Tigera Operator CRDs
+      command: kubectl create -f https://raw.githubusercontent.com/projectcalico/calico/{{ calico_version }}/manifests/operator-crds.yaml
+      when: tigera_crds_check.rc != 0
+
+    # -------------------------------------------------------------------------
+    # Install Tigera Operator
+    # -------------------------------------------------------------------------
+    - name: Check if Tigera Operator is installed
+      command: kubectl get deployment tigera-operator -n tigera-operator
+      register: tigera_operator_check
+      failed_when: false
+      changed_when: false
+
+    - name: Install Tigera Operator
+      command: kubectl create -f https://raw.githubusercontent.com/projectcalico/calico/{{ calico_version }}/manifests/tigera-operator.yaml
+      when: tigera_operator_check.rc != 0
+
+    # -------------------------------------------------------------------------
+    # Apply custom resources
+    # -------------------------------------------------------------------------
+    - name: Check if Calico Installation custom resource exists
+      command: kubectl get installation default
+      register: calico_installation_check
+      failed_when: false
+      changed_when: false
+
+    - name: Apply Calico custom resources
+      command: kubectl create -f {{ playbook_dir }}/calico-crd.yaml
+      when: calico_installation_check.rc != 0
+
+    # -------------------------------------------------------------------------
+    # Monitor Calico deployment
+    # -------------------------------------------------------------------------
+    - name: Wait for Calico to be available
+      command: kubectl get tigerastatus calico -o jsonpath='{.status.conditions[?(@.type=="Available")].status}'
+      register: calico_status
+      until: calico_status.stdout == "True"
+      retries: 60
+      delay: 10
+      changed_when: false
+
+    - name: Display Calico status
+      command: kubectl get tigerastatus
+      register: calico_tigerastatus
+      changed_when: false
+
+    - name: Show Calico status
+      debug:
+        var: calico_tigerastatus.stdout_lines
+
+    - name: Verify Calico pods
+      command: kubectl get pods -n calico-system
+      register: calico_pods
+      changed_when: false
+
+    - name: Show Calico pods
+      debug:
+        var: calico_pods.stdout_lines

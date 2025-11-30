@@ -1,0 +1,304 @@
+---
+# =============================================================================
+# Play 1: Upgrade control plane
+# =============================================================================
+- name: Upgrade control plane
+  hosts: control_plane
+  become: yes
+  gather_facts: no
+  serial: 1
+
+  tasks:
+    - name: Get current Kubernetes version
+      command: kubectl get nodes {{ inventory_hostname }} -o jsonpath='{.status.nodeInfo.kubeletVersion}'
+      register: current_version
+      changed_when: false
+      delegate_to: "{{ groups['control_plane'][0] }}"
+
+    - name: Display current version
+      debug:
+        msg: "Current version: {{ current_version.stdout }}, Target version: {{ kubernetes_version }}"
+
+    - name: Check if upgrade is needed
+      set_fact:
+        needs_upgrade: "{{ current_version.stdout != kubernetes_version }}"
+
+    - name: Skip if already at target version
+      debug:
+        msg: "Node {{ inventory_hostname }} is already at {{ kubernetes_version }}, skipping"
+      when: not needs_upgrade
+
+    # -------------------------------------------------------------------------
+    # Upgrade kubeadm
+    # -------------------------------------------------------------------------
+    - name: Update apt cache
+      apt:
+        update_cache: yes
+      when: needs_upgrade
+
+    - name: Unhold kubeadm
+      command: apt-mark unhold kubeadm
+      when: needs_upgrade
+
+    - name: Upgrade kubeadm to target version
+      apt:
+        name: "kubeadm={{ kubernetes_version | regex_replace('^v', '') }}-*"
+        state: present
+        allow_downgrade: yes
+      when: needs_upgrade
+
+    - name: Hold kubeadm
+      command: apt-mark hold kubeadm
+      when: needs_upgrade
+
+    - name: Verify kubeadm version
+      command: kubeadm version -o short
+      register: kubeadm_ver
+      changed_when: false
+      when: needs_upgrade
+
+    - name: Display kubeadm version
+      debug:
+        var: kubeadm_ver.stdout
+      when: needs_upgrade
+
+    # -------------------------------------------------------------------------
+    # Plan and apply upgrade (first control plane only)
+    # -------------------------------------------------------------------------
+    - name: Run kubeadm upgrade plan
+      command: kubeadm upgrade plan
+      register: upgrade_plan
+      changed_when: false
+      when:
+        - needs_upgrade
+        - inventory_hostname == groups['control_plane'][0]
+
+    - name: Display upgrade plan
+      debug:
+        var: upgrade_plan.stdout_lines
+      when:
+        - needs_upgrade
+        - inventory_hostname == groups['control_plane'][0]
+
+    - name: Apply kubeadm upgrade on first control plane
+      command: kubeadm upgrade apply {{ kubernetes_version }} --yes
+      when:
+        - needs_upgrade
+        - inventory_hostname == groups['control_plane'][0]
+
+    - name: Upgrade additional control plane nodes
+      command: kubeadm upgrade node
+      when:
+        - needs_upgrade
+        - inventory_hostname != groups['control_plane'][0]
+
+    # -------------------------------------------------------------------------
+    # Drain node
+    # -------------------------------------------------------------------------
+    - name: Drain control plane node
+      command: kubectl drain {{ inventory_hostname }} --ignore-daemonsets --delete-emptydir-data --force
+      delegate_to: "{{ groups['control_plane'][0] }}"
+      when: needs_upgrade
+
+    # -------------------------------------------------------------------------
+    # Upgrade kubelet and kubectl
+    # -------------------------------------------------------------------------
+    - name: Unhold kubelet and kubectl
+      command: apt-mark unhold kubelet kubectl
+      when: needs_upgrade
+
+    - name: Upgrade kubelet and kubectl
+      apt:
+        name:
+          - "kubelet={{ kubernetes_version | regex_replace('^v', '') }}-*"
+          - "kubectl={{ kubernetes_version | regex_replace('^v', '') }}-*"
+        state: present
+        allow_downgrade: yes
+      when: needs_upgrade
+
+    - name: Hold kubelet and kubectl
+      command: apt-mark hold kubelet kubectl
+      when: needs_upgrade
+
+    - name: Restart kubelet
+      systemd:
+        name: kubelet
+        daemon_reload: yes
+        state: restarted
+      when: needs_upgrade
+
+    # -------------------------------------------------------------------------
+    # Uncordon node
+    # -------------------------------------------------------------------------
+    - name: Wait for node to be ready
+      command: kubectl get nodes {{ inventory_hostname }} -o jsonpath='{.status.conditions[?(@.type=="Ready")].status}'
+      register: node_ready
+      until: node_ready.stdout == "True"
+      retries: 30
+      delay: 10
+      changed_when: false
+      delegate_to: "{{ groups['control_plane'][0] }}"
+      when: needs_upgrade
+
+    - name: Uncordon control plane node
+      command: kubectl uncordon {{ inventory_hostname }}
+      delegate_to: "{{ groups['control_plane'][0] }}"
+      when: needs_upgrade
+
+    - name: Verify node version after upgrade
+      command: kubectl get nodes {{ inventory_hostname }} -o jsonpath='{.status.nodeInfo.kubeletVersion}'
+      register: new_version
+      changed_when: false
+      delegate_to: "{{ groups['control_plane'][0] }}"
+
+    - name: Display upgraded version
+      debug:
+        msg: "Node {{ inventory_hostname }} upgraded from {{ current_version.stdout }} to {{ new_version.stdout }}"
+      when: needs_upgrade
+
+# =============================================================================
+# Play 2: Upgrade worker nodes
+# =============================================================================
+- name: Upgrade worker nodes
+  hosts: workers
+  become: yes
+  gather_facts: no
+  serial: 1
+
+  tasks:
+    - name: Get current Kubernetes version
+      command: kubectl get nodes {{ inventory_hostname }} -o jsonpath='{.status.nodeInfo.kubeletVersion}'
+      register: current_version
+      changed_when: false
+      delegate_to: "{{ groups['control_plane'][0] }}"
+
+    - name: Display current version
+      debug:
+        msg: "Current version: {{ current_version.stdout }}, Target version: {{ kubernetes_version }}"
+
+    - name: Check if upgrade is needed
+      set_fact:
+        needs_upgrade: "{{ current_version.stdout != kubernetes_version }}"
+
+    - name: Skip if already at target version
+      debug:
+        msg: "Node {{ inventory_hostname }} is already at {{ kubernetes_version }}, skipping"
+      when: not needs_upgrade
+
+    # -------------------------------------------------------------------------
+    # Drain node
+    # -------------------------------------------------------------------------
+    - name: Drain worker node
+      command: kubectl drain {{ inventory_hostname }} --ignore-daemonsets --delete-emptydir-data --force
+      delegate_to: "{{ groups['control_plane'][0] }}"
+      when: needs_upgrade
+
+    # -------------------------------------------------------------------------
+    # Upgrade kubeadm
+    # -------------------------------------------------------------------------
+    - name: Update apt cache
+      apt:
+        update_cache: yes
+      when: needs_upgrade
+
+    - name: Unhold kubeadm
+      command: apt-mark unhold kubeadm
+      when: needs_upgrade
+
+    - name: Upgrade kubeadm to target version
+      apt:
+        name: "kubeadm={{ kubernetes_version | regex_replace('^v', '') }}-*"
+        state: present
+        allow_downgrade: yes
+      when: needs_upgrade
+
+    - name: Hold kubeadm
+      command: apt-mark hold kubeadm
+      when: needs_upgrade
+
+    # -------------------------------------------------------------------------
+    # Upgrade node config
+    # -------------------------------------------------------------------------
+    - name: Upgrade kubeadm node config
+      command: kubeadm upgrade node
+      when: needs_upgrade
+
+    # -------------------------------------------------------------------------
+    # Upgrade kubelet and kubectl
+    # -------------------------------------------------------------------------
+    - name: Unhold kubelet and kubectl
+      command: apt-mark unhold kubelet kubectl
+      when: needs_upgrade
+
+    - name: Upgrade kubelet and kubectl
+      apt:
+        name:
+          - "kubelet={{ kubernetes_version | regex_replace('^v', '') }}-*"
+          - "kubectl={{ kubernetes_version | regex_replace('^v', '') }}-*"
+        state: present
+        allow_downgrade: yes
+      when: needs_upgrade
+
+    - name: Hold kubelet and kubectl
+      command: apt-mark hold kubelet kubectl
+      when: needs_upgrade
+
+    - name: Restart kubelet
+      systemd:
+        name: kubelet
+        daemon_reload: yes
+        state: restarted
+      when: needs_upgrade
+
+    # -------------------------------------------------------------------------
+    # Uncordon node
+    # -------------------------------------------------------------------------
+    - name: Wait for node to be ready
+      command: kubectl get nodes {{ inventory_hostname }} -o jsonpath='{.status.conditions[?(@.type=="Ready")].status}'
+      register: node_ready
+      until: node_ready.stdout == "True"
+      retries: 30
+      delay: 10
+      changed_when: false
+      delegate_to: "{{ groups['control_plane'][0] }}"
+      when: needs_upgrade
+
+    - name: Uncordon worker node
+      command: kubectl uncordon {{ inventory_hostname }}
+      delegate_to: "{{ groups['control_plane'][0] }}"
+      when: needs_upgrade
+
+    - name: Verify node version after upgrade
+      command: kubectl get nodes {{ inventory_hostname }} -o jsonpath='{.status.nodeInfo.kubeletVersion}'
+      register: new_version
+      changed_when: false
+      delegate_to: "{{ groups['control_plane'][0] }}"
+
+    - name: Display upgraded version
+      debug:
+        msg: "Node {{ inventory_hostname }} upgraded from {{ current_version.stdout }} to {{ new_version.stdout }}"
+      when: needs_upgrade
+
+# =============================================================================
+# Play 3: Verify cluster state
+# =============================================================================
+- name: Verify cluster state after upgrade
+  hosts: control_plane[0]
+  become: yes
+  gather_facts: no
+
+  tasks:
+    - name: Get all nodes status
+      command: kubectl get nodes -o wide
+      register: nodes_status
+      changed_when: false
+
+    - name: Display cluster nodes
+      debug:
+        var: nodes_status.stdout_lines
+
+    - name: Verify all nodes are Ready
+      shell: kubectl get nodes --no-headers | grep -v " Ready " | wc -l
+      register: not_ready
+      changed_when: false
+      failed_when: not_ready.stdout | int > 0

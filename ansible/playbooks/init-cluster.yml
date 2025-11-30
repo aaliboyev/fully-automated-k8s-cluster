@@ -1,0 +1,103 @@
+---
+# =============================================================================
+# Initialize Kubernetes cluster on first control plane node
+# =============================================================================
+- name: Initialize Kubernetes cluster
+  hosts: control_plane[0]
+  become: yes
+  gather_facts: no
+
+  tasks:
+    # -------------------------------------------------------------------------
+    # Initialize cluster with kubeadm
+    # -------------------------------------------------------------------------
+    - name: Check if cluster is already initialized
+      stat:
+        path: /etc/kubernetes/admin.conf
+      register: kubeconfig_stat
+
+    - name: Initialize Kubernetes cluster with kubeadm
+      command: kubeadm init --pod-network-cidr={{ pod_network_cidr }}
+      when: not kubeconfig_stat.stat.exists
+
+    # -------------------------------------------------------------------------
+    # Setup kubectl for root user
+    # -------------------------------------------------------------------------
+    - name: Create .kube directory for root
+      file:
+        path: /root/.kube
+        state: directory
+        mode: '0755'
+
+    - name: Copy admin.conf to root's kubeconfig
+      copy:
+        src: /etc/kubernetes/admin.conf
+        dest: /root/.kube/config
+        remote_src: yes
+        mode: '0600'
+
+    # -------------------------------------------------------------------------
+    # Display cluster initialization status
+    # Note: Node will show as NotReady until CNI is installed
+    #       Run install-calico.yml or your CNI of choice next
+    # -------------------------------------------------------------------------
+    - name: Display cluster status
+      command: kubectl get nodes
+      register: nodes_status
+      changed_when: false
+
+    - name: Show nodes status
+      debug:
+        var: nodes_status.stdout_lines
+
+    - name: Display cluster info
+      debug:
+        msg: |
+          Cluster initialized successfully!
+          Note: Control plane node will show as NotReady until CNI is installed.
+          Next step: Install a CNI plugin (e.g., run install-calico.yml)
+
+    # -------------------------------------------------------------------------
+    # Fetch kubeconfig to local machine and merge without overwriting
+    # -------------------------------------------------------------------------
+    - name: Ensure local kube directory exists
+      file:
+        path: "{{ lookup('env','HOME') }}/.kube"
+        state: directory
+        mode: '0700'
+      delegate_to: localhost
+      become: no
+      run_once: true
+
+    - name: Fetch kubeconfig from control plane
+      fetch:
+        src: /etc/kubernetes/admin.conf
+        dest: /tmp/k8s-{{ inventory_hostname }}-kubeconfig
+        flat: yes
+      become: yes
+
+    - name: Merge kubeconfig with existing config
+      shell: |
+        set -euo pipefail
+        # Backup existing config if present
+        if [ -f "$HOME/.kube/config" ]; then
+          cp "$HOME/.kube/config" "$HOME/.kube/config.backup.$(date +%Y%m%d_%H%M%S)"
+        fi
+        # Merge new kubeconfig into main config
+        KUBECONFIG="$HOME/.kube/config:/tmp/k8s-{{ inventory_hostname }}-kubeconfig" kubectl config view --flatten > "$HOME/.kube/config.tmp"
+        mv "$HOME/.kube/config.tmp" "$HOME/.kube/config"
+        chmod 600 "$HOME/.kube/config"
+        # Clean up temp file
+        rm -f "/tmp/k8s-{{ inventory_hostname }}-kubeconfig"
+      delegate_to: localhost
+      become: no
+      changed_when: false
+
+    - name: Display kubeconfig info
+      debug:
+        msg: |
+          Kubeconfig updated:
+          - Config merged into: ~/.kube/config
+          - Backup created: ~/.kube/config.backup.<timestamp>
+          - Context name: kubernetes-admin@kubernetes
+          - Use 'kubectl config use-context kubernetes-admin@kubernetes' to switch to this cluster

@@ -1,0 +1,47 @@
+---
+# =============================================================================
+# Join worker nodes to Kubernetes cluster
+# Usage: ansible-playbook -i inventory.ini playbooks/join-workers.yml
+#        ansible-playbook -i inventory.ini playbooks/join-workers.yml --limit n1,n3
+# =============================================================================
+- name: Join worker nodes to cluster
+  hosts: workers
+  become: yes
+  gather_facts: no
+
+  tasks:
+    # Generate join command from control plane
+    - name: Generate worker join command
+      command: kubeadm token create --print-join-command
+      register: join_command
+      changed_when: false
+      delegate_to: "{{ groups['control_plane'][0] }}"
+      run_once: true
+
+    - name: Display join command
+      debug:
+        msg: "{{ join_command.stdout }}"
+      run_once: true
+
+    # Check and join worker node
+    - name: Check if node is already part of cluster
+      stat:
+        path: /etc/kubernetes/kubelet.conf
+      register: kubelet_conf
+
+    - name: Join node to cluster
+      command: "{{ join_command.stdout }}"
+      when: not kubelet_conf.stat.exists
+
+    - name: Wait for node to be ready
+      command: kubectl get node {{ inventory_hostname }} -o jsonpath='{.status.conditions[?(@.type=="Ready")].status}'
+      register: node_ready
+      until: node_ready.stdout == "True"
+      retries: 30
+      delay: 10
+      changed_when: false
+      delegate_to: "{{ groups['control_plane'][0] }}"
+
+    - name: Display node status
+      debug:
+        msg: "Node {{ inventory_hostname }} is Ready"

@@ -1,0 +1,16 @@
+provider:
+  name: cloudflare
+env:
+  - name: CF_API_TOKEN
+    valueFrom:
+      secretKeyRef:
+        name: cloudflare-api-token
+        key: api-token
+policy: sync
+logLevel: debug
+dnsPolicy: ClusterFirstWithHostNet
+sources:
+  - service
+  - ingress
+  - gateway-httproute
+txtPrefix: "_external-dns."

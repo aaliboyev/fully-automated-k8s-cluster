@@ -1,0 +1,6 @@
+apiVersion: v2
+name: network
+description: Network stack for Kubernetes cluster including Traefik, cert-manager, external-dns, and twingate
+type: application
+version: 1.0.0
+appVersion: "1.0"

@@ -1,0 +1,26 @@
+connector:
+  existingSecret: "twingate-connector-credentials"
+  logLevel: "info"
+  # Optional: Custom DNS server
+  # dnsServer: "8.8.8.8"
+
+# Security context
+securityContext:
+  allowPrivilegeEscalation: false
+  capabilities:
+    drop: ["ALL"]
+  readOnlyRootFilesystem: true
+  runAsNonRoot: true
+  runAsUser: 65532
+  seccompProfile:
+    type: RuntimeDefault
+
+# Node selector - deploy to specific nodes if needed
+nodeSelector: {}
+  # kubernetes.io/hostname: worker-node-1
+
+# Tolerations - allow scheduling on tainted nodes
+tolerations: []
+  # - key: "node-role.kubernetes.io/control-plane"
+  #   operator: "Exists"
+  #   effect: "NoSchedule"

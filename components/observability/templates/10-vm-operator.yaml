@@ -1,0 +1,28 @@
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: vm-operator
+  namespace: argocd
+  annotations:
+    argocd.argoproj.io/sync-wave: "1"
+spec:
+  project: default
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: observability
+  sources:
+    - repoURL: https://victoriametrics.github.io/helm-charts
+      chart: victoria-metrics-operator
+      targetRevision: 0.56.4
+      helm:
+        valueFiles:
+          - $values/components/observability/values/operator.yaml
+    - repoURL: {{ .Values.repoURL }}
+      targetRevision: main
+      ref: values
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - ServerSideApply=true

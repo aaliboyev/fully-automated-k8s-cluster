@@ -1,0 +1,27 @@
+# Network stack configuration
+# These values are used across all network component templates
+
+# Base domain for all services
+domain: example.com
+gatewayHostname: "*.example.com"
+argocdHostname: argocd.example.com
+longhornHostname: longhorn.example.com
+
+# Email for Let's Encrypt certificate notifications
+email: infra@example.com
+
+# External DNS configuration
+externalDns:
+  txtOwnerId: my-cluster-infra
+
+traefik:
+  private:
+    hostname: internal.example.com
+
+twingate:
+  network: my-twingate-network
+
+# Git repository URL for ArgoCD applications
+repoURL: git@github.com:yourusername/your-repo.git
+
+# Child application Helm values are in the values/ directory

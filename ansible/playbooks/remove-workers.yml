@@ -1,0 +1,109 @@
+---
+# =============================================================================
+# Remove worker nodes from Kubernetes cluster
+# Usage: ansible-playbook -i inventory.ini playbooks/remove-workers.yml --limit n1
+#        ansible-playbook -i inventory.ini playbooks/remove-workers.yml --limit n1,n3,n4
+# =============================================================================
+- name: Remove worker nodes from cluster
+  hosts: workers
+  become: yes
+  gather_facts: no
+
+  tasks:
+    # Cordon and drain from control plane
+    - name: Cordon node
+      command: kubectl cordon {{ inventory_hostname }}
+      delegate_to: "{{ groups['control_plane'][0] }}"
+      failed_when: false
+
+    - name: Drain node (delete local data and ignore daemonsets)
+      command: >
+        kubectl drain {{ inventory_hostname }}
+        --ignore-daemonsets
+        --delete-emptydir-data
+        --force
+        --timeout=10m
+        --grace-period=60
+      delegate_to: "{{ groups['control_plane'][0] }}"
+      register: drain_result
+
+    - name: Display drain result
+      debug:
+        var: drain_result.stdout_lines
+
+    - name: Wait for pods to be fully evacuated
+      shell: |
+        pod_count=$(kubectl get pods --all-namespaces --field-selector spec.nodeName={{ inventory_hostname }} --no-headers 2>/dev/null | wc -l)
+        echo "Pods remaining: $pod_count"
+        exit $pod_count
+      delegate_to: "{{ groups['control_plane'][0] }}"
+      register: pod_check
+      until: pod_check.rc == 0
+      retries: 30
+      delay: 10
+      changed_when: false
+
+    - name: Display evacuation status
+      debug:
+        msg: "All pods successfully evacuated from {{ inventory_hostname }}"
+
+    - name: Delete node from cluster
+      command: kubectl delete node {{ inventory_hostname }}
+      delegate_to: "{{ groups['control_plane'][0] }}"
+      register: delete_result
+      failed_when: false
+
+    - name: Display delete result
+      debug:
+        msg: "Node {{ inventory_hostname }} removed from cluster"
+      when: delete_result.rc == 0
+
+    # Reset the worker node
+    - name: Reset kubeadm on worker node
+      command: kubeadm reset -f
+      register: reset_result
+
+    - name: Stop kubelet
+      systemd:
+        name: kubelet
+        state: stopped
+
+    - name: Clean up Kubernetes directories
+      file:
+        path: "{{ item }}"
+        state: absent
+      loop:
+        - /etc/kubernetes
+        - /var/lib/kubelet
+        - /etc/cni/net.d
+      ignore_errors: yes
+
+    - name: Clean up CNI network interfaces
+      shell: |
+        ip link delete cni0 2>/dev/null || true
+        ip link delete flannel.1 2>/dev/null || true
+        ip link delete tunl0 2>/dev/null || true
+        ip link delete vxlan.calico 2>/dev/null || true
+      ignore_errors: yes
+
+    - name: Display reset result
+      debug:
+        msg: "Node {{ inventory_hostname }} has been reset and cleaned"
+
+# =============================================================================
+# Display remaining cluster nodes
+# =============================================================================
+- name: Display cluster status
+  hosts: control_plane[0]
+  become: yes
+  gather_facts: no
+
+  tasks:
+    - name: Get remaining nodes
+      command: kubectl get nodes
+      register: nodes_status
+      changed_when: false
+
+    - name: Show remaining nodes
+      debug:
+        var: nodes_status.stdout_lines

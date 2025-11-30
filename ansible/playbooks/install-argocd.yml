@@ -1,0 +1,155 @@
+---
+# =============================================================================
+# Install ArgoCD using Helm
+# Usage: ansible-playbook -i inventory.ini playbooks/install-argocd.yml
+# =============================================================================
+- name: Install ArgoCD
+  hosts: control_plane[0]
+  become: yes
+  gather_facts: no
+
+  tasks:
+    # -------------------------------------------------------------------------
+    # Install Helm (if not already installed)
+    # -------------------------------------------------------------------------
+    - name: Check if Helm is installed
+      command: which helm
+      register: helm_check
+      failed_when: false
+      changed_when: false
+
+    - name: Install Helm
+      shell: curl https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash
+      when: helm_check.rc != 0
+
+    # -------------------------------------------------------------------------
+    # Create ArgoCD namespace
+    # -------------------------------------------------------------------------
+    - name: Check if ArgoCD namespace exists
+      command: kubectl get namespace {{ argocd_namespace }}
+      register: argocd_ns_check
+      failed_when: false
+      changed_when: false
+
+    - name: Create ArgoCD namespace
+      command: kubectl create namespace {{ argocd_namespace }}
+      when: argocd_ns_check.rc != 0
+
+    # -------------------------------------------------------------------------
+    # Install ArgoCD with Helm
+    # -------------------------------------------------------------------------
+    - name: Add ArgoCD Helm repository
+      command: helm repo add argo https://argoproj.github.io/argo-helm
+      register: helm_repo_add
+      changed_when: "'already exists' not in helm_repo_add.stdout"
+      failed_when: false
+
+    - name: Update Helm repositories
+      command: helm repo update
+      changed_when: false
+
+    - name: Check if ArgoCD is already installed
+      command: helm list -n {{ argocd_namespace }} -q
+      register: helm_list
+      changed_when: false
+
+    - name: Copy ArgoCD values file
+      copy:
+        src: "{{ playbook_dir }}/../../components/argocd/values.yaml"
+        dest: /tmp/argocd-values.yaml
+        mode: '0644'
+      when: "'argocd' not in helm_list.stdout"
+
+    - name: Install ArgoCD via Helm
+      command: >
+        helm install argocd argo/argo-cd
+        --namespace {{ argocd_namespace }}
+        --version {{ argocd_chart_version }}
+        --values /tmp/argocd-values.yaml
+      when: "'argocd' not in helm_list.stdout"
+
+    # -------------------------------------------------------------------------
+    # Wait for ArgoCD to be ready
+    # -------------------------------------------------------------------------
+    - name: Wait for ArgoCD server to be ready
+      command: kubectl -n {{ argocd_namespace }} rollout status deployment/argocd-server --timeout=10m
+      changed_when: false
+
+    - name: Wait for ArgoCD application controller to be ready
+      command: kubectl -n {{ argocd_namespace }} rollout status statefulset/argocd-application-controller --timeout=10m
+      changed_when: false
+
+    - name: Wait for ArgoCD repo server to be ready
+      command: kubectl -n {{ argocd_namespace }} rollout status deployment/argocd-repo-server --timeout=10m
+      changed_when: false
+
+    # -------------------------------------------------------------------------
+    # Display ArgoCD status and access information
+    # -------------------------------------------------------------------------
+    - name: Display ArgoCD pods
+      command: kubectl -n {{ argocd_namespace }} get pods
+      register: argocd_pods
+      changed_when: false
+
+    - name: Show ArgoCD pods status
+      debug:
+        var: argocd_pods.stdout_lines
+
+    - name: Get ArgoCD services
+      command: kubectl -n {{ argocd_namespace }} get svc
+      register: argocd_services
+      changed_when: false
+
+    - name: Show ArgoCD services
+      debug:
+        var: argocd_services.stdout_lines
+
+    - name: Get ArgoCD initial admin password
+      command: kubectl -n {{ argocd_namespace }} get secret argocd-initial-admin-secret -o jsonpath='{.data.password}'
+      register: argocd_password_encoded
+      changed_when: false
+      failed_when: false
+
+    - name: Decode ArgoCD admin password
+      command: echo {{ argocd_password_encoded.stdout }}
+      register: argocd_password_raw
+      changed_when: false
+      when: argocd_password_encoded.rc == 0
+
+    - name: Decode base64 password
+      shell: echo '{{ argocd_password_raw.stdout }}' | base64 -d
+      register: argocd_password
+      changed_when: false
+      when: argocd_password_encoded.rc == 0
+
+    - name: Display ArgoCD access info
+      debug:
+        msg: |
+          =============================================================================
+          ArgoCD installed successfully!
+          =============================================================================
+          
+          Access ArgoCD UI:
+          - HTTP:  http://<node-ip>:30080
+          - HTTPS: https://<node-ip>:30443
+          
+          Login credentials:
+          - Username: admin
+          - Password: {{ argocd_password.stdout if argocd_password_encoded.rc == 0 else 'See below' }}
+          
+          {% if argocd_password_encoded.rc != 0 %}
+          To get password manually:
+          kubectl -n {{ argocd_namespace }} get secret argocd-initial-admin-secret -o jsonpath="{.data.password}" | base64 -d
+          {% endif %}
+          
+          To access via port-forward:
+          kubectl port-forward -n {{ argocd_namespace }} svc/argocd-server 8080:80
+          Then open: http://localhost:8080
+          
+          To install ArgoCD CLI:
+          curl -sSL -o /usr/local/bin/argocd https://github.com/argoproj/argo-cd/releases/latest/download/argocd-linux-amd64
+          chmod +x /usr/local/bin/argocd
+          
+          To login via CLI:
+          argocd login <node-ip>:30080 --username admin --password <password> --insecure
+          =============================================================================

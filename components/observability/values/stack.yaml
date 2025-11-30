@@ -1,0 +1,39 @@
+# scraper
+vmagent:
+  enabled: true
+  spec:
+    scrapeInterval: "30s"
+    replicaCount: 1
+    # Let the stack install Kubernetes scrape configs for kubelet, apiserver, etc.
+    # It ships a bunch of sane defaults for k8s components.
+
+# operator itself
+victoria-metrics-operator:
+  enabled: false
+
+# alerts
+vmalert:
+  enabled: true
+  spec:
+    replicaCount: 1
+  # The stack brings a lot of kube-prometheus rules out of the box.
+
+alertmanager:
+  enabled: true
+  alertmanagerSpec:
+    replicaCount: 1
+    # Later: configure receivers for email/Telegram/etc.
+
+# dashboards
+grafana:
+  enabled: true
+  replicaCount: 1
+#  persistence:
+#    enabled: true
+#    size: 10Gi
+#    storageClassName: longhorn
+#  sidecar:
+#    dashboards:
+#      enabled: true
+#    datasources:
+#      enabled: true

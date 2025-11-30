@@ -1,0 +1,14 @@
+# Observability stack configuration
+# These values are used across all observability component templates
+
+# Base domain for all services
+domain: example.com
+
+# Subdomain for Grafana
+grafana:
+  domain: grafana.example.com
+
+# Git repository URL for ArgoCD applications
+repoURL: git@github.com:yourusername/your-repo.git
+
+# Child application Helm values are in the values/ directory

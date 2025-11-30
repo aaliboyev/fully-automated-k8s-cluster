@@ -1,0 +1,76 @@
+# ArgoCD Configuration
+# https://argo-cd.readthedocs.io/
+
+# Global configuration
+global:
+  # Domain for ArgoCD (optional, can be configured later)
+  domain: argocd.local
+
+# Server configuration
+server:
+  # Expose ArgoCD server via NodePort for easy access
+  service:
+    type: NodePort
+    nodePortHttp: 30080
+    nodePortHttps: 30443
+  
+  # Ingress configuration (disabled by default)
+  ingress:
+    enabled: false
+  
+  # Resource limits
+  resources:
+    limits:
+      cpu: 500m
+      memory: 512Mi
+    requests:
+      cpu: 100m
+      memory: 128Mi
+
+# Application controller configuration
+controller:
+  resources:
+    limits:
+      cpu: 1000m
+      memory: 1Gi
+    requests:
+      cpu: 250m
+      memory: 256Mi
+
+# Repo server configuration
+repoServer:
+  resources:
+    limits:
+      cpu: 500m
+      memory: 512Mi
+    requests:
+      cpu: 100m
+      memory: 128Mi
+
+# Redis configuration
+redis:
+  resources:
+    limits:
+      cpu: 200m
+      memory: 256Mi
+    requests:
+      cpu: 100m
+      memory: 128Mi
+
+# Dex OAuth (disabled by default)
+dex:
+  enabled: false
+
+# Notifications controller (optional)
+notifications:
+  enabled: true
+
+# ApplicationSet controller (for managing multiple apps)
+applicationSet:
+  enabled: true
+
+# Config management plugins
+configs:
+  params:
+    # Disable TLS for easier initial setup
+    server.insecure: true

@@ -1,0 +1,28 @@
+ingressClass:
+  enabled: true
+  isDefaultClass: true
+  name: "private"
+gatewayClass:
+  enabled: true
+  name: "private"
+  labels:
+    gateway-class-type: private
+gateway:
+  enabled: false
+service:
+  type: ClusterIP
+  annotations:
+    external-dns.alpha.kubernetes.io/target: 10.111.111.111
+  spec:
+    clusterIP: 10.111.111.111
+providers:
+  kubernetesIngress:
+    enabled: true
+  kubernetesGateway:
+    enabled: true
+    labelselector: "gateway-class-type=private"
+ports:
+  web:
+    port: 8000
+  websecure:
+    port: 8443

@@ -1,0 +1,28 @@
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: network-external-dns
+  namespace: argocd
+  annotations:
+    argocd.argoproj.io/sync-wave: "1"
+spec:
+  project: default
+  sources:
+    - repoURL: https://kubernetes-sigs.github.io/external-dns
+      chart: external-dns
+      targetRevision: 1.19.0
+      helm:
+        valueFiles:
+          - $values/components/network/values/external-dns-cloudflare.yaml
+        values: |
+          txtOwnerId: {{ .Values.externalDns.txtOwnerId | quote }}
+    - repoURL: {{ .Values.repoURL }}
+      targetRevision: main
+      ref: values
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: network
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true

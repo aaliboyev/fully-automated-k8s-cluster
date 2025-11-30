@@ -1,0 +1,22 @@
+---
+# =============================================================================
+# Kubernetes Cluster Configuration
+# =============================================================================
+
+# Kubernetes
+kubernetes_version: "v1.34"  # Minor version for apt repository
+
+# Network
+pod_network_cidr: "192.168.0.0/16"
+
+# CNI - Calico
+calico_version: "v3.31.2"
+calico_manifest_url: "https://raw.githubusercontent.com/projectcalico/calico/{{ calico_version }}/manifests/calico.yaml"
+
+# Storage - Longhorn
+longhorn_cli_version: "v1.10.1"
+longhorn_chart_version: "1.10.1"
+
+# GitOps - ArgoCD
+argocd_chart_version: "7.7.12"
+argocd_namespace: "argocd"

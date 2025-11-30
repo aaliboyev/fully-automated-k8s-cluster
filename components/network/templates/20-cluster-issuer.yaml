@@ -1,0 +1,38 @@
+apiVersion: cert-manager.io/v1
+kind: ClusterIssuer
+metadata:
+  name: letsencrypt-dns
+  annotations:
+    argocd.argoproj.io/sync-wave: "2"
+spec:
+  acme:
+    # Production Let's Encrypt server
+    server: https://acme-v02.api.letsencrypt.org/directory
+    
+    # Email for certificate expiration notifications
+    email: {{ .Values.email }}
+    
+    # Secret to store the ACME account private key
+    privateKeySecretRef:
+      name: letsencrypt-dns-account-key
+    
+    # DNS-01 challenge configuration using Cloudflare
+    solvers:
+    - dns01:
+        cloudflare:
+          # Cloudflare API token (recommended) or API key
+          apiTokenSecretRef:
+            name: cloudflare-api-token
+            key: api-token
+          
+          # Optional: If using API key instead of API token, use:
+          # email: your-cloudflare-email@example.com
+          # apiKeySecretRef:
+          #   name: cloudflare-api-key
+          #   key: api-key
+      
+      # Optional: Specify which domains this solver applies to
+      # selector:
+      #   dnsZones:
+      #   - 'example.com'
+      #   - '*.example.com'

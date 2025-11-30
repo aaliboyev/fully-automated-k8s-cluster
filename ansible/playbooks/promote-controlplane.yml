@@ -1,0 +1,63 @@
+---
+# 1) Prepare control-plane join command on the first CP (n2)
+- name: Prepare control-plane join command on primary CP
+  hosts: control_plane[0]
+  become: yes
+  gather_facts: no
+
+  tasks:
+    - name: Get current API server address
+      shell: kubectl config view --minify -o jsonpath='{.clusters[0].cluster.server}' | sed 's|https://||'
+      register: api_endpoint
+
+    - name: Check if controlPlaneEndpoint exists
+      shell: kubectl get configmap kubeadm-config -n kube-system -o jsonpath='{.data.ClusterConfiguration}' | grep -c controlPlaneEndpoint || true
+      register: has_endpoint
+
+    - name: Update kubeadm config with controlPlaneEndpoint
+      shell: |
+        TEMP_FILE=$(mktemp)
+        kubectl get configmap kubeadm-config -n kube-system -o jsonpath='{.data.ClusterConfiguration}' > $TEMP_FILE
+        echo "controlPlaneEndpoint: {{ api_endpoint.stdout }}" >> $TEMP_FILE
+        kubectl create configmap kubeadm-config --from-file=ClusterConfiguration=$TEMP_FILE -n kube-system --dry-run=client -o yaml | kubectl apply -f -
+        rm -f $TEMP_FILE
+      when: has_endpoint.stdout == "0"
+
+    - name: Upload certs and get certificate key
+      command: kubeadm init phase upload-certs --upload-certs
+      register: upload_certs
+
+    - name: Extract certificate key
+      set_fact:
+        cert_key: "{{ upload_certs.stdout_lines[-1] | trim }}"
+
+    - name: Create base join command
+      command: kubeadm token create --print-join-command --ttl=2h
+      register: cp_join_cmd_raw
+
+    - name: Combine join command with control-plane flags
+      set_fact:
+        kube_cp_join_cmd: >-
+          {{ cp_join_cmd_raw.stdout }}
+          --control-plane
+          --certificate-key {{ cert_key }}
+
+
+# 2) Join all *other* control planes (n5, etc.)
+- name: Join additional control-plane nodes
+  hosts: control_plane[1:]
+  become: yes
+  gather_facts: no
+
+  tasks:
+    - name: Fetch join command from primary CP
+      set_fact:
+        join_cmd: "{{ hostvars[groups['control_plane'][0]].kube_cp_join_cmd }}"
+      delegate_to: "{{ groups['control_plane'][0] }}"
+      delegate_facts: yes
+      run_once: yes
+
+    - name: Run kubeadm control-plane join if not already joined
+      command: "{{ hostvars[groups['control_plane'][0]].kube_cp_join_cmd }}"
+      args:
+        creates: /etc/kubernetes/kubelet.conf
