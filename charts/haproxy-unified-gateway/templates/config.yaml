@@ -1,0 +1,50 @@
+{{- $global := dict
+  "merge_strategy" "append"
+  "performance_options" (dict "maxconn" (int .Values.haproxy.global.maxconn))
+  "ssl_options" (dict "default_bind_options" (printf "ssl-min-ver %s no-tls-tickets" .Values.haproxy.global.sslMinVersion))
+-}}
+{{- $d := .Values.haproxy.defaults -}}
+{{- $defaults := dict
+  "merge_strategy" "append"
+  "name" "haproxytech"
+  "client_timeout" (int $d.timeouts.client)
+  "server_timeout" (int $d.timeouts.server)
+  "http_request_timeout" (int $d.timeouts.httpRequest)
+  "http_keep_alive_timeout" (int $d.timeouts.httpKeepAlive)
+  "queue_timeout" (int $d.timeouts.queue)
+  "connect_timeout" (int $d.timeouts.connect)
+  "http_reuse" $d.httpReuse
+  "default_server" (dict "maxconn" (int $d.serverMaxconn))
+  "log_format" $d.logFormat
+-}}
+apiVersion: gate.v3.haproxy.org/v3
+kind: HugConf
+metadata:
+  name: {{ include "hug.fullname" . }}
+  labels:
+    {{- include "hug.labels" . | nindent 4 }}
+spec:
+  logging:
+    {{- toYaml .Values.logging | nindent 4 }}
+  globalRef:
+    name: {{ include "hug.fullname" . }}
+  defaultsRef:
+    name: {{ include "hug.fullname" . }}
+---
+apiVersion: gate.v3.haproxy.org/v3
+kind: Global
+metadata:
+  name: {{ include "hug.fullname" . }}
+  labels:
+    {{- include "hug.labels" . | nindent 4 }}
+spec:
+  {{- toYaml (mergeOverwrite $global (deepCopy .Values.haproxy.global.extra)) | nindent 2 }}
+---
+apiVersion: gate.v3.haproxy.org/v3
+kind: Defaults
+metadata:
+  name: {{ include "hug.fullname" . }}
+  labels:
+    {{- include "hug.labels" . | nindent 4 }}
+spec:
+  {{- toYaml (mergeOverwrite $defaults (deepCopy .Values.haproxy.defaults.extra)) | nindent 2 }}

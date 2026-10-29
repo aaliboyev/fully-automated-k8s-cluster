@@ -1,77 +1,55 @@
-# Kubernetes Cluster Management with Ansible
+# Ansible
 
-Complete Ansible automation for deploying and managing Kubernetes clusters.
+Ansible manages the nodes and everything ArgoCD depends on: Kubernetes,
+containerd, the Cilium CNI, local-path storage and ArgoCD itself. Everything
+above that is an Argo app.
 
-## Overview
+Run playbooks from this directory: `ansible.cfg` sets `inventory.ini`, the
+root SSH user and the key. Variables are in `group_vars/all.yml`; Cilium's Helm
+values are in `cilium/`.
 
-This setup separates concerns into:
-1. **Server initialization** (`server-init.sh`) - Base OS setup, containerd, networking
-2. **Kubernetes installation** (`install-k8s.yml`) - Install kubeadm, kubelet, kubectl  
-3. **Cluster management** (various playbooks) - Initialize, join nodes, install storage
-
-## Quick Start
-
-```bash
-# 1. Initialize servers (run on each node)
-sudo bash /path/to/server-init.sh
-
-# 2. Install Kubernetes
-ansible-playbook -i inventory.ini playbooks/install-k8s.yml
-
-# 3. Initialize cluster
-ansible-playbook -i inventory.ini playbooks/init-cluster.yml
-
-# 4. Join workers
-ansible-playbook -i inventory.ini playbooks/join-workers.yml
-
-# 5. Install storage (optional)
-ansible-playbook -i inventory.ini playbooks/install-longhorn.yml
-```
+The order for a new cluster is in [../BOOTSTRAP.md](../BOOTSTRAP.md#phase-1-nodes-and-base-layer).
 
 ## Playbooks
 
-### install-k8s.yml
-Install Kubernetes components (kubeadm, kubelet, kubectl)
+### Cluster lifecycle
+
+| Playbook | Purpose |
+|----------|---------|
+| `install-k8s.yml` | kubeadm, kubelet, kubectl (held) and kernel headers |
+| `init-cluster.yml` | `kubeadm init` on the first control plane, without kube-proxy |
+| `join-workers.yml` | Join workers |
+| `promote-controlplane.yml` | Join additional control planes |
+| `upgrade-cluster.yml` | Rolling Kubernetes upgrade, one node at a time |
+| `remove-workers.yml` | Drain, delete and clean workers |
+
+### Node configuration
+
+| Playbook | Purpose |
+|----------|---------|
+| `upgrade-containerd.yml` | Install the pinned `containerd.io`, one node at a time |
+| `update-kernel.yml` | Latest kernel and headers (and optionally `apt upgrade`), rolling reboot with storage gates |
+| `configure-sysctl.yml` | inotify and conntrack limits |
+| `configure-firewall.yml` | nftables guard for cluster-internal ports |
+| `configure-registry-mirrors.yml` | containerd pulls `ghcr.io` and `docker.io` through Harbor |
+| `install-tailscale.yml` | Enroll nodes in the tailnet ([../TAILSCALE.md](../TAILSCALE.md)) |
+
+### Cluster add-ons
+
+| Playbook | Purpose |
+|----------|---------|
+| `install-cilium.yml` | Install or upgrade Cilium (`-e cilium_routing=tunnel` for VXLAN) |
+| `install-local-path.yml` | local-path-provisioner (`local-path`, `local-fast`) |
+| `install-argocd.yml` | ArgoCD |
+
+Details per playbook: [playbooks/README.md](playbooks/README.md). Kubeconfig
+handling: [KUBECONFIG.md](KUBECONFIG.md).
+
+## Examples
 
 ```bash
-ansible-playbook -i inventory.ini playbooks/install-k8s.yml
-ansible-playbook -i inventory.ini playbooks/install-k8s.yml --limit n1
+ansible-playbook playbooks/install-k8s.yml --limit node5
+ansible-playbook playbooks/install-cilium.yml
+ansible-playbook playbooks/update-kernel.yml --limit node3
+ansible-playbook playbooks/upgrade-cluster.yml -e kubernetes_version=v1.35
 ```
-
-### init-cluster.yml  
-Initialize Kubernetes cluster on first control plane
-
-```bash
-ansible-playbook -i inventory.ini playbooks/init-cluster.yml
-```
-
-### join-workers.yml
-Join worker nodes to cluster
-
-```bash
-ansible-playbook -i inventory.ini playbooks/join-workers.yml
-ansible-playbook -i inventory.ini playbooks/join-workers.yml --limit n1,n3
-```
-
-### remove-workers.yml
-Remove and clean worker nodes
-
-```bash
-ansible-playbook -i inventory.ini playbooks/remove-workers.yml --limit n1
-```
-
-### install-longhorn.yml
-Install Longhorn distributed storage
-
-```bash
-ansible-playbook -i inventory.ini playbooks/install-longhorn.yml
-```
-
-## Configuration
-
-Edit `group_vars/all.yml`:
-- `kubernetes_version`: "v1.34"
-- `calico_version`: "v3.31.2"
-- `longhorn_cli_version`: "v1.10.1"
-
-See individual playbook README files for details.

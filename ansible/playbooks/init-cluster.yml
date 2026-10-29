@@ -16,8 +16,20 @@
         path: /etc/kubernetes/admin.conf
       register: kubeconfig_stat
 
+    - name: Write kubeadm init config
+      copy:
+        dest: /root/kubeadm-init.yaml
+        mode: '0600'
+        content: |
+          apiVersion: kubeadm.k8s.io/v1beta4
+          kind: ClusterConfiguration
+          clusterName: {{ cluster_name }}
+          networking:
+            podSubnet: {{ pod_network_cidr }}
+      when: not kubeconfig_stat.stat.exists
+
     - name: Initialize Kubernetes cluster with kubeadm
-      command: kubeadm init --pod-network-cidr={{ pod_network_cidr }}
+      command: kubeadm init --config /root/kubeadm-init.yaml --skip-phases=addon/kube-proxy
       when: not kubeconfig_stat.stat.exists
 
     # -------------------------------------------------------------------------
@@ -39,7 +51,7 @@
     # -------------------------------------------------------------------------
     # Display cluster initialization status
     # Note: Node will show as NotReady until CNI is installed
-    #       Run install-calico.yml or your CNI of choice next
+    #       Run install-cilium.yml next
     # -------------------------------------------------------------------------
     - name: Display cluster status
       command: kubectl get nodes
@@ -55,7 +67,7 @@
         msg: |
           Cluster initialized successfully!
           Note: Control plane node will show as NotReady until CNI is installed.
-          Next step: Install a CNI plugin (e.g., run install-calico.yml)
+          Next step: Install a CNI plugin (run install-cilium.yml)
 
     # -------------------------------------------------------------------------
     # Fetch kubeconfig to local machine and merge without overwriting
@@ -99,5 +111,5 @@
           Kubeconfig updated:
           - Config merged into: ~/.kube/config
           - Backup created: ~/.kube/config.backup.<timestamp>
-          - Context name: kubernetes-admin@kubernetes
-          - Use 'kubectl config use-context kubernetes-admin@kubernetes' to switch to this cluster
+          - Context name: kubernetes-admin@{{ cluster_name }}
+          - Use 'kubectl config use-context kubernetes-admin@{{ cluster_name }}' to switch to this cluster

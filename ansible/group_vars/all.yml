@@ -6,17 +6,29 @@
 # Kubernetes
 kubernetes_version: "v1.34"  # Minor version for apt repository
 
+# Container runtime (Docker apt repo package; bundles runc)
+containerd_version: "2.3.6-1~debian.13~trixie"
+
+# Cluster name in kubeconfigs and controller-manager --cluster-name
+cluster_name: "k8s-cluster"
+
 # Network
 pod_network_cidr: "192.168.0.0/16"
 
-# CNI - Calico
-calico_version: "v3.31.2"
-calico_manifest_url: "https://raw.githubusercontent.com/projectcalico/calico/{{ calico_version }}/manifests/calico.yaml"
+# Host ports reachable only from nodes, pods, loopback and Tailscale (configure-firewall.yml)
+firewall_guarded_tcp_ports: [111, 179, 1024, 2379, 2380, 4240, 4244, 5473, 6443, 9000, 9100, 9101, 9253, 9808, 9809, 9962, 9963, 9964, 9965, 10250, 10256, 10257, 10259, 31060]
+firewall_guarded_udp_ports: [111]
 
-# Storage - Longhorn
-longhorn_cli_version: "v1.10.1"
-longhorn_chart_version: "1.10.1"
+# CNI - Cilium (values in ansible/cilium/)
+cilium_version: "1.20.2"
+
+# Storage - local-path (git tag of rancher/local-path-provisioner; chart + image)
+local_path_version: "v0.0.37"
 
 # GitOps - ArgoCD
-argocd_chart_version: "7.7.12"
+argocd_chart_version: "10.9.2"
 argocd_namespace: "argocd"
+
+# Checked after every node reboot (update-kernel.yml)
+node_health_urls:
+  - https://app.example.com/healthz

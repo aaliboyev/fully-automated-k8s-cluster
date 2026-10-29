@@ -1,0 +1,50 @@
+{{- if or .Values.buildkitConfig .Values.registry.enabled }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "buildkit.fullname" . }}-config
+  labels:
+    {{- include "buildkit.labels" . | nindent 4 }}
+data:
+  buildkitd.toml: |
+    {{- if .Values.buildkitConfig }}
+    {{- .Values.buildkitConfig | nindent 4 }}
+    {{- else }}
+    debug = {{ .Values.config.debug }}
+    
+    [worker.oci]
+      enabled = true
+      platforms = [ "linux/amd64", "linux/arm64" ]
+    
+    [worker.containerd]
+      enabled = false
+    {{- end }}
+    
+    {{- if .Values.registry.enabled }}
+    {{- $registryURL := .Values.registry.url }}
+    {{- $httpMode := false }}
+    {{- if .Values.registry.useInternalService }}
+      {{- $registryURL = printf "%s.%s.svc.cluster.local:%d" .Values.registry.internalService.name .Values.registry.internalService.namespace (.Values.registry.internalService.port | int) }}
+      {{- $httpMode = true }}
+    {{- end }}
+    {{- if $registryURL }}
+    [registry."{{ $registryURL }}"]
+      {{- if $httpMode }}
+      http = true
+      {{- else }}
+      http = false
+      {{- end }}
+      {{- if .Values.registry.insecure }}
+      insecure = true
+      {{- end }}
+      {{- if and .Values.registry.ca (not $httpMode) }}
+      ca=["/etc/buildkit/certs/ca.crt"]
+      {{- end }}
+    {{- end }}
+    
+    {{- range .Values.registry.mirrors }}
+    [registry."{{ .registry }}"]
+      mirrors = {{ .mirrors | toJson }}
+    {{- end }}
+    {{- end }}
+{{- end }}

@@ -5,23 +5,22 @@
 domain: example.com
 gatewayHostname: "*.example.com"
 argocdHostname: argocd.example.com
-longhornHostname: longhorn.example.com
 
 # Email for Let's Encrypt certificate notifications
-email: infra@example.com
+email: admin@example.com
 
 # External DNS configuration
 externalDns:
-  txtOwnerId: my-cluster-infra
+  txtOwnerId: example-infra
 
 traefik:
   private:
     hostname: internal.example.com
 
-twingate:
-  network: my-twingate-network
+# Public Gateways point DNS here: one A record per HAProxy edge node.
+publicEdgeHostname: dns.example.com
 
 # Git repository URL for ArgoCD applications
-repoURL: git@github.com:yourusername/your-repo.git
+repoURL: git@github.com:your-org/your-infra-repo.git
 
 # Child application Helm values are in the values/ directory

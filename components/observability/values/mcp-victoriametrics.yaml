@@ -1,0 +1,8 @@
+fullnameOverride: mcp-victoriametrics
+# The chart's appVersion (v1.120.1) has no upstream release behind it.
+image:
+  tag: v1.20.2
+vm:
+  type: single
+  entrypoint: http://vmsingle-vm-stack-victoria-metrics-k8s-stack.observability.svc:8428
+resources: {requests: {memory: 640Mi}, limits: {memory: 1Gi}}

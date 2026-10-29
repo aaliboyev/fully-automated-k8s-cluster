@@ -1,0 +1,22 @@
+# Argo CD is installed outside Argo, so its scrape lives here.
+apiVersion: operator.victoriametrics.com/v1beta1
+kind: VMPodScrape
+metadata:
+  name: argocd
+  namespace: argocd
+  annotations:
+    argocd.argoproj.io/sync-wave: "3"
+spec:
+  selector:
+    matchExpressions:
+      - key: app.kubernetes.io/name
+        operator: In
+        values:
+          - argocd-application-controller
+          - argocd-applicationset-controller
+          - argocd-repo-server
+          - argocd-server
+  podMetricsEndpoints:
+    - port: metrics
+      path: /metrics
+      interval: 30s

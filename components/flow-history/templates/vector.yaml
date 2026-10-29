@@ -1,0 +1,60 @@
+{{- $v := .Values.vector }}
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: vector
+  namespace: {{ .Release.Namespace }}
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: vector
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: vector
+        app.kubernetes.io/part-of: flow-history
+      annotations:
+        checksum/config: {{ include (print $.Template.BasePath "/vector-config.yaml") . | sha256sum }}
+    spec:
+      # Every node runs a Cilium agent and writes flows, control plane included.
+      tolerations:
+        - operator: Exists
+      automountServiceAccountToken: false
+      securityContext:
+        seccompProfile: {type: RuntimeDefault}
+      containers:
+        - name: vector
+          image: {{ $v.image }}
+          args: [--config, /etc/vector/vector.yaml]
+          # One worker per host core by default; on 20-core nodes a backlog
+          # then outgrows the memory limit. Two keep up with the flow rate.
+          env:
+            - {name: VECTOR_THREADS, value: "2"}
+          resources:
+            {{- toYaml $v.resources | nindent 12 }}
+          # Root for the root-owned host directories; nothing else.
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: {drop: [ALL]}
+          volumeMounts:
+            - {name: config, mountPath: /etc/vector, readOnly: true}
+            - {name: secrets, mountPath: /etc/vector-secrets, readOnly: true}
+            - {name: hubble, mountPath: /var/run/cilium/hubble, readOnly: true}
+            - {name: data, mountPath: /var/lib/vector}
+      volumes:
+        - name: config
+          configMap:
+            name: vector-config
+        - name: secrets
+          secret:
+            secretName: flow-history-clickhouse
+            items: [{key: vector-password, path: vector-password}]
+        - name: hubble
+          hostPath:
+            path: /var/run/cilium/hubble
+            type: Directory
+        - name: data
+          hostPath:
+            path: {{ $v.dataDir }}
+            type: DirectoryOrCreate

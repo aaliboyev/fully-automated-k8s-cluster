@@ -1,0 +1,96 @@
+{{/*
+Rules follow what the 1.0.9 controller calls. Its caches are cluster-wide
+informers, so reads are list/watch (no get: reads hit the cache). Not granted:
+nodes (only read for NodePort Services), leases (no runnable waits for
+leadership), events (no recorder), CRD writes and Secret writes (only the
+--job-* modes write CRDs; nothing writes Secrets).
+*/}}
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ include "hug.fullname" . }}
+  labels:
+    {{- include "hug.labels" . | nindent 4 }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "hug.fullname" . }}
+  labels:
+    {{- include "hug.labels" . | nindent 4 }}
+rules:
+  # Informers for every watched kind; HTTPRoute/TLSRoute/ReferenceGrant decide backends and cross-namespace refs.
+  - apiGroups: [gateway.networking.k8s.io]
+    resources: [gatewayclasses, gateways, httproutes, tlsroutes, referencegrants]
+    verbs: [list, watch]
+  # Status writer: GatewayClass and Gateway use Update, routes use merge Patch.
+  - apiGroups: [gateway.networking.k8s.io]
+    resources: [gatewayclasses/status, gateways/status, httproutes/status, tlsroutes/status]
+    verbs: [update, patch]
+  # Secrets: listener certificates. Services/EndpointSlices: backend servers by pod IP.
+  # Namespaces: allowedRoutes selectors. ConfigMaps: watched by the controller; failing the watch stops it.
+  - apiGroups: [""]
+    resources: [secrets, services, namespaces, configmaps]
+    verbs: [list, watch]
+  - apiGroups: [discovery.k8s.io]
+    resources: [endpointslices]
+    verbs: [list, watch]
+  # Metadata-only watch of Gateway API CRDs for the bundle-version check.
+  - apiGroups: [apiextensions.k8s.io]
+    resources: [customresourcedefinitions]
+    verbs: [list, watch]
+  - apiGroups: [gate.v3.haproxy.org]
+    resources: [hugconfs, huggates, globals, defaults, backends]
+    verbs: [list, watch]
+  {{- if eq .Values.metricsAuth "kube-rbac" }}
+  # Authenticates and authorizes scrapers of the controller metrics port.
+  - apiGroups: [authentication.k8s.io]
+    resources: [tokenreviews]
+    verbs: [create]
+  - apiGroups: [authorization.k8s.io]
+    resources: [subjectaccessreviews]
+    verbs: [create]
+  {{- end }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ include "hug.fullname" . }}
+  labels:
+    {{- include "hug.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ include "hug.fullname" . }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "hug.fullname" . }}
+    namespace: {{ .Release.Namespace }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ include "hug.fullname" . }}
+  labels:
+    {{- include "hug.labels" . | nindent 4 }}
+rules:
+  # Rewrites its own Service's ports to match the listeners.
+  - apiGroups: [""]
+    resources: [services]
+    resourceNames: [{{ include "hug.fullname" . }}]
+    verbs: [patch]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ include "hug.fullname" . }}
+  labels:
+    {{- include "hug.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ include "hug.fullname" . }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "hug.fullname" . }}
+    namespace: {{ .Release.Namespace }}

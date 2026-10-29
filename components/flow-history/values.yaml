@@ -1,0 +1,29 @@
+# Cilium writes masked flows to a rotated JSON file on every node
+# (hubble.export.static in ansible/cilium/values.yaml); Vector tails it into
+# ClickHouse table hubble.flows. Parts older than hotDays move to the S3 disk,
+# older than retentionDays are dropped. Secrets: create-secrets.sh.
+
+clickhouse:
+  image: clickhouse/clickhouse-server:25.8.33.6@sha256:0152dd511befe6a2c2ef53e930726179669b08116da78500b37c51c96ff5ee77
+  node: node4
+  storageClass: local-path
+  size: 50Gi
+  resources:
+    requests: {cpu: 500m, memory: 2Gi}
+    limits: {memory: 4Gi}
+  s3:
+    bucket: example-hubble-flows
+    region: eu-central-1
+  hotDays: 30
+  retentionDays: 90
+
+vector:
+  image: timberio/vector:0.60.0-distroless-libc@sha256:a9ed9a4710bdc2efa66e94c1e8edc7b439709e6e50079f1e1b2b1bf479d387da
+  # Checkpoints, so a restart resumes where it stopped.
+  dataDir: /var/lib/flow-history/vector
+  resources:
+    requests: {cpu: 50m, memory: 64Mi}
+    limits: {memory: 256Mi}
+
+hubbleUI:
+  hostname: hubble.example.com

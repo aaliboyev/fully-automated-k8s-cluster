@@ -1,0 +1,12 @@
+# Webhook certs from cert-manager (self-signed CA the chart creates). Without
+# it the chart renders a new random cert on every sync, the running operator
+# keeps serving the old one, and server-side diff fails on the webhook.
+admissionWebhooks:
+  certManager:
+    enabled: true
+resources: {requests: {memory: 160Mi}, limits: {memory: 256Mi}}
+# Applies to the config-reloader sidecar of every VM resource; the operator's
+# default leaves its memory unlimited.
+env:
+  - name: VM_CONFIG_RELOADER_LIMIT_MEMORY
+    value: 64Mi

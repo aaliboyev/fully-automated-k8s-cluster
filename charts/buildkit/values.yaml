@@ -1,0 +1,108 @@
+replicaCount: 1
+
+image:
+  repository: moby/buildkit
+  pullPolicy: IfNotPresent
+  tag: "v0.17.1"
+
+imagePullSecrets: []
+nameOverride: ""
+fullnameOverride: ""
+
+serviceAccount:
+  create: true
+  annotations: {}
+  name: ""
+
+podAnnotations: {}
+
+podSecurityContext:
+  runAsUser: 0
+  runAsGroup: 0
+  fsGroup: 0
+
+securityContext:
+  privileged: true
+
+service:
+  type: ClusterIP
+  port: 1234
+
+resources:
+  limits:
+    cpu: 2000m
+    memory: 4Gi
+  requests:
+    cpu: 500m
+    memory: 1Gi
+
+nodeSelector: {}
+
+tolerations: []
+
+affinity: {}
+
+persistence:
+  enabled: true
+  storageClass: ""
+  size: 50Gi
+  accessMode: ReadWriteOnce
+
+config:
+  # BuildKit configuration
+  debug: false
+  # Additional buildkitd flags
+  extraArgs: []
+  # BUILDKIT_STEP_LOG_MAX_SIZE
+  stepLogMaxSize: 10485760
+  # BUILDKIT_STEP_LOG_MAX_SPEED
+  stepLogMaxSpeed: 100000
+
+# Registry configuration for Harbor or other registries
+registry:
+  # Enable registry configuration
+  enabled: false
+  # Registry URL (e.g., harbor.example.com for external, or harbor-core.namespace.svc.cluster.local for internal)
+  url: ""
+  # Use internal cluster service URL (no SSL, plain HTTP)
+  # If true, uses internal service name and http protocol
+  # If false, uses external domain with https
+  useInternalService: false
+  # Internal service configuration (when useInternalService=true)
+  internalService:
+    # Service name (e.g., harbor-registry for Harbor)
+    name: ""
+    # Namespace where Harbor is deployed
+    namespace: ""
+    # Port (5000 for harbor-registry, 80 for harbor-core API)
+    port: 5000
+  # Registry authentication
+  auth:
+    # Use existing secret for registry credentials
+    existingSecret: ""
+    # Or specify credentials directly (will create a secret)
+    username: ""
+    password: ""
+  # Additional registry mirrors/configs
+  mirrors: []
+  # Example:
+  # mirrors:
+  #   - registry: docker.io
+  #     mirrors:
+  #       - http://harbor.example.com/v2/dockerhub
+  # Enable insecure registry (for development or internal HTTP)
+  insecure: false
+  # CA certificate for registry (if using self-signed certs with HTTPS)
+  ca: ""
+
+# BuildKit configuration file (buildkitd.toml)
+buildkitConfig: ""
+  # Example configuration:
+  # debug = false
+  # [worker.oci]
+  #   enabled = true
+  # [worker.containerd]
+  #   enabled = false
+  # [registry."harbor.example.com"]
+  #   http = false
+  #   insecure = false

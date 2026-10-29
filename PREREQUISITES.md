@@ -1,6 +1,6 @@
 # Prerequisites
 
-This document outlines all requirements and preparatory steps needed before deploying the Kubernetes infrastructure.
+What has to exist before [BOOTSTRAP.md](BOOTSTRAP.md).
 
 ## Table of Contents
 
@@ -14,506 +14,278 @@ This document outlines all requirements and preparatory steps needed before depl
 
 ### VPS/Bare Metal Servers
 
-This setup is designed for **bare metal or VPS deployments** where you don't have access to cloud load balancers (unlike AWS ELB, GCP Load Balancer, etc.).
+The cluster runs on VPS or bare metal servers with root access and public IPs.
+There is no cloud load balancer: the public edge binds 80/443 on the edge
+nodes' own addresses. Managed Kubernetes services (EKS, GKE, AKS) don't fit
+this setup.
 
 #### Minimum Requirements
 
-**Control Plane Nodes** (1-3 nodes):
+**Control plane node**:
 - 2 vCPU cores
 - 4 GB RAM
 - 50 GB disk space
-- Ubuntu 22.04 LTS or later
-- Public IP address (at least one node for ingress)
 
-**Worker Nodes** (3+ recommended):
+**Worker nodes** (3 or more):
 - 4 vCPU cores
-- 8 GB RAM
+- 8 GB RAM (16 GB leaves room for workloads next to the cluster services)
 - 100 GB disk space
-- Additional disk/partition for Longhorn storage (recommended)
-- Ubuntu 22.04 LTS or later
+- Free space on the root filesystem for replicated volumes (thin files, no extra disk needed)
 
-**Important**: You need VPS or bare metal servers with direct root access and public IPs. Managed Kubernetes services (EKS, GKE, AKS) are not compatible with this setup.
+All nodes run **Debian 13**: the playbooks install `linux-image-amd64` and
+`linux-headers-amd64`, and the Docker and Tailscale apt repositories are the
+trixie ones.
 
 ### Network Requirements
 
-- All nodes must be able to communicate with each other
-- At least one node must have a public IP for ingress traffic
-- Ports required:
-  - **80/443** (HTTP/HTTPS) - For Traefik ingress
-  - **6443** - Kubernetes API server
-  - **2379-2380** - etcd
-  - **10250** - Kubelet API
-  - **30000-32767** - NodePort services (if needed)
+- Every node has a public IP; nodes reach each other over those addresses.
+  Node-to-node traffic is encrypted by Cilium's WireGuard, so nodes don't need
+  a private network or shared L2.
+- Open between nodes: UDP 51871 (Cilium WireGuard) and the cluster-internal
+  ports in `firewall_guarded_tcp_ports` (`ansible/group_vars/all.yml`), among
+  them 6443 (API server), 2379-2380 (etcd), 10250 (kubelet), 4240 (Cilium
+  health) and 4244 (Hubble).
+- Open to the internet on the edge nodes: 80 and 443.
+- SSH (22) and Tailscale stay open to the internet on every node.
+
+`configure-firewall.yml` restricts the guarded ports to nodes, pods, loopback
+and `tailscale0`.
 
 ## SSH Configuration
 
 ### Why Use SSH Config?
 
-Using SSH config keeps your Ansible inventory clean and maintainable. Instead of hardcoding IPs and connection details in the inventory, you define them once in your SSH config.
+Ansible's inventory holds only host aliases; addresses, users and keys live in
+`~/.ssh/config`, so ssh, scp and Ansible use the same names.
 
 ### Setting Up SSH Config
 
-#### Step 1: Create/Edit SSH Config
+#### Step 1: Define Server Connections
 
-Edit or create `~/.ssh/config` on your local machine:
-
-```bash
-vim ~/.ssh/config
-```
-
-#### Step 2: Define Server Connections
-
-Add your server configurations:
+Add each node to `~/.ssh/config` on your workstation:
 
 ```ssh-config
-# Kubernetes Control Plane Nodes
 Host n1
-    HostName 192.168.1.10
+    HostName 192.0.2.10
     User root
     IdentityFile ~/.ssh/id_rsa
-    Port 22
 
 Host n2
-    HostName 192.168.1.11
+    HostName 192.0.2.11
     User root
     IdentityFile ~/.ssh/id_rsa
-    Port 22
 
 Host n3
-    HostName 192.168.1.12
+    HostName 192.0.2.12
     User root
     IdentityFile ~/.ssh/id_rsa
-    Port 22
 
-# Kubernetes Worker Nodes
 Host n4
-    HostName 192.168.1.21
+    HostName 192.0.2.13
     User root
     IdentityFile ~/.ssh/id_rsa
-    Port 22
 
-Host n5
-    HostName 192.168.1.22
-    User root
-    IdentityFile ~/.ssh/id_rsa
-    Port 22
-
-Host n6
-    HostName 192.168.1.23
-    User root
-    IdentityFile ~/.ssh/id_rsa
-    Port 22
-
-# Optional: Wildcard config for all nodes
 Host n*
     ServerAliveInterval 60
     ServerAliveCountMax 3
-    StrictHostKeyChecking no
-    UserKnownHostsFile /dev/null
 ```
 
-**Configuration Options Explained:**
-- `HostName` - The actual IP address or hostname of the server
-- `User` - SSH user (typically `root` for initial setup)
-- `IdentityFile` - Path to your SSH private key
-- `Port` - SSH port (default 22)
-- `ServerAliveInterval` - Keeps SSH connection alive
-- `StrictHostKeyChecking` - Disable for automated deployments (optional)
+`ansible/ansible.cfg` already sets `remote_user = root`,
+`private_key_file = ~/.ssh/id_rsa` and disables host key checking.
 
-#### Step 3: Set Correct Permissions
+#### Step 2: Set Permissions and Test
 
 ```bash
 chmod 600 ~/.ssh/config
+for h in n1 n2 n3 n4; do ssh "$h" hostname; done
 ```
 
-#### Step 4: Test SSH Connections
-
-```bash
-# Test each node
-ssh n1 'hostname'
-ssh n2 'hostname'
-ssh n3 'hostname'
-ssh n4 'hostname'
-ssh n5 'hostname'
-ssh n6 'hostname'
-```
-
-All commands should connect without prompting for passwords or confirmations.
+Every command should connect without a password prompt.
 
 ### Configuring Ansible Inventory
 
-With SSH config in place, your `ansible/inventory.ini` becomes clean and simple:
+`ansible/inventory.ini` then lists only aliases:
 
 ```ini
 [control_plane]
 n1
-n2
-n3
 
 [workers]
+n2
+n3
 n4
-n5
-n6
 
 [k8s:children]
 control_plane
 workers
 ```
 
-**Benefits of this approach:**
-- Clean, readable inventory
-- Centralized SSH configuration
-- Easy to add/remove nodes
-- No hardcoded IPs in multiple places
-- Consistent across all tools (Ansible, kubectl, ssh, scp)
-
 ### SSH Key Setup
 
-If you haven't set up SSH key authentication yet:
-
 ```bash
-# Generate SSH key pair (if needed)
-ssh-keygen -t rsa -b 4096 -C "your_email@example.com"
-
-# Copy SSH key to each server
-ssh-copy-id -i ~/.ssh/id_rsa.pub root@192.168.1.10
-ssh-copy-id -i ~/.ssh/id_rsa.pub root@192.168.1.11
+ssh-keygen -t rsa -b 4096
+ssh-copy-id -i ~/.ssh/id_rsa.pub root@192.0.2.10
 # ... repeat for all servers
-
-# Or manually copy
-cat ~/.ssh/id_rsa.pub | ssh root@192.168.1.10 "mkdir -p ~/.ssh && cat >> ~/.ssh/authorized_keys"
 ```
 
 ## Required Software
 
-### Local Machine (Control Machine)
+### Workstation
 
-#### 1. Ansible
-
-**Version**: 2.10 or later
-
-**Installation:**
-
-```bash
-# macOS
-brew install ansible
-
-# Ubuntu/Debian
-sudo apt update
-sudo apt install ansible
-
-# RHEL/CentOS
-sudo yum install ansible
-
-# Python pip
-pip3 install ansible
-```
-
-**Verify installation:**
-```bash
-ansible --version
-```
-
-#### 2. kubectl
-
-**Version**: Compatible with your Kubernetes version (v1.34 in this setup)
-
-**Installation:**
+| Tool | Why |
+|------|-----|
+| Ansible 2.10+ | All node and base-layer playbooks |
+| kubectl | Matching `kubernetes_version` in `ansible/group_vars/all.yml` |
+| Tailscale client | The API server and the private gateway are reachable only over the tailnet |
+| git | This repository |
+| yq | Splitting the Gateway API CRD bundle ([components/network/README.md](components/network/README.md)) |
+| Helm 3 (optional) | Rendering charts locally; the playbooks install Helm on the control plane themselves |
+| ArgoCD CLI (optional) | Managing applications from the command line |
 
 ```bash
 # macOS
-brew install kubectl
+brew install ansible kubectl git yq helm argocd
 
-# Linux
-curl -LO "https://dl.k8s.io/release/$(curl -L -s https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl"
-sudo install -o root -g root -m 0755 kubectl /usr/local/bin/kubectl
-
-# Verify
-kubectl version --client
-```
-
-#### 3. Helm (Optional)
-
-**Version**: 3.x
-
-Useful for debugging Helm charts locally.
-
-```bash
-# macOS
-brew install helm
-
-# Linux
-curl https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash
-
-# Verify
-helm version
-```
-
-#### 4. Git
-
-Required for cloning and managing this repository.
-
-```bash
-# macOS
-brew install git
-
-# Ubuntu/Debian
-sudo apt install git
-
-# Verify
-git --version
-```
-
-#### 5. ArgoCD CLI (Optional)
-
-Useful for managing ArgoCD applications from the command line.
-
-```bash
-# macOS
-brew install argocd
-
-# Linux
-curl -sSL -o /usr/local/bin/argocd https://github.com/argoproj/argo-cd/releases/latest/download/argocd-linux-amd64
-chmod +x /usr/local/bin/argocd
-
-# Verify
-argocd version --client
+# Debian
+sudo apt install ansible git
 ```
 
 ### Target Servers
 
-The `scripts/server-init.sh` script will install all required software on target servers:
-- containerd (container runtime)
-- Kubernetes components (kubeadm, kubelet, kubectl)
-- CNI plugins
-- Required kernel modules
-- iscsi tools (for Longhorn)
+`scripts/server-init.sh` installs base packages and containerd, loads the
+kernel modules and sets the sysctls. `install-k8s.yml` installs kubeadm,
+kubelet, kubectl and `linux-headers-amd64`; `update-kernel.yml` keeps kernel
+and headers matched, because the LINSTOR satellite compiles the DRBD module
+against them. `upgrade-containerd.yml` replaces Debian's containerd with the
+`containerd.io` version pinned in `group_vars/all.yml`.
 
 ## Domain and DNS Setup
 
-### Domain Registration
-
-You need a **registered domain name** that you control.
-
 ### Cloudflare DNS Management
 
-This setup requires **Cloudflare** for DNS management because:
-- We use `external-dns` with Cloudflare provider for automatic DNS record creation
-- We use `cert-manager` with Cloudflare DNS-01 challenge for Let's Encrypt certificates
+The domain's DNS must be on **Cloudflare**:
+- `external-dns` (Cloudflare provider) creates a record for every route hostname
+- `cert-manager` solves Let's Encrypt DNS-01 challenges through the Cloudflare API
 
-#### Setting Up Cloudflare DNS
+Add the domain to Cloudflare and point the registrar's nameservers at it:
 
-1. **Create a Cloudflare Account** (if you don't have one)
-   - Go to https://cloudflare.com and sign up
+```bash
+dig NS yourdomain.com
+```
 
-2. **Add Your Domain to Cloudflare**
-   - Click "Add a Site"
-   - Enter your domain name
-   - Choose a plan (Free plan is sufficient)
-   - Update nameservers at your domain registrar to point to Cloudflare
+### Records Created by Hand
 
-3. **Verify DNS is Working**
-   ```bash
-   dig yourdomain.com
-   # Should show Cloudflare nameservers
-   ```
-
-#### Create DNS Records
-
-Before deployment, create a wildcard A record pointing to your ingress node:
+external-dns points public hostnames at the edge name (`publicEdgeHostname`
+in `components/network/values.yaml`) and private hostnames at the private
+gateway. The edge name itself is created by hand, one A record per edge node:
 
 ```
 Type: A
-Name: *
-Content: <PUBLIC_IP_OF_INGRESS_NODE>
+Name: <edge name, e.g. dns>
+Content: <public IP of an edge node>
 Proxy: Disabled (DNS only)
-TTL: Auto
 ```
 
-This allows `*.yourdomain.com` to route to your cluster.
-
-**Note**: `external-dns` will automatically create additional records (like `argocd.yourdomain.com`, `grafana.yourdomain.com`) after deployment.
+Repeat for each edge node. Tailnet addresses (`<host>.net.<domain>`) are also
+manual records; see [TAILSCALE.md](TAILSCALE.md#addressing).
 
 ## Service Accounts and API Keys
 
 ### Cloudflare API Token
 
-Required for `cert-manager` and `external-dns`.
+Used by `cert-manager` and `external-dns`.
 
-#### Create API Token
+1. Cloudflare dashboard → **My Profile** → **API Tokens** → **Create Token**
+2. Use the **Edit zone DNS** template or a custom token with:
+   - Zone / DNS / Edit
+   - Zone / Zone / Read
+   - Zone resources: the domain(s) the cluster serves
+3. Copy the token; it is shown once.
 
-1. Log into Cloudflare Dashboard
-2. Go to **My Profile** → **API Tokens**
-3. Click **Create Token**
-4. Use the **Edit zone DNS** template or create custom with:
-   - Permissions:
-     - Zone / DNS / Edit
-     - Zone / Zone / Read
-   - Zone Resources:
-     - Include / Specific zone / yourdomain.com
-5. Copy the token (you'll only see it once)
-
-**Save this token securely** - you'll need it during Phase 2 deployment.
-
-#### Token Verification
-
-Test your token:
+Verify it:
 
 ```bash
-curl -X GET "https://api.cloudflare.com/client/v4/user/tokens/verify" \
-     -H "Authorization: Bearer YOUR_TOKEN_HERE" \
-     -H "Content-Type:application/json"
+curl -s "https://api.cloudflare.com/client/v4/user/tokens/verify" \
+     -H "Authorization: Bearer <TOKEN>" | jq .result.status
+# "active"
 ```
 
-Should return:
-```json
-{
-  "success": true,
-  "messages": [],
-  "result": {
-    "id": "...",
-    "status": "active"
-  }
-}
-```
+### Tailscale
 
-### Twingate Service Keys (Optional)
+See [TAILSCALE.md](TAILSCALE.md):
 
-If using Twingate for zero-trust network access to private services:
+1. Create a tailnet and apply `tailscale/acl.hujson` as the tailnet policy.
+2. **Settings** → **Keys**: generate a **reusable** pre-auth key tagged
+   `tag:node`. Pass it to `install-tailscale.yml` at runtime; never commit it.
+3. **Settings** → **OAuth clients**: create a client for the Tailscale
+   operator; its ID and secret go into the `operator-oauth` secret.
 
-1. Log into your Twingate Admin Console
-2. Navigate to **Settings** → **Connectors**
-3. Create a new Connector
-4. Generate service key tokens:
-   - `TWINGATE_ACCESS_TOKEN`
-   - `TWINGATE_REFRESH_TOKEN`
-5. Copy both tokens
-
-**Save these tokens securely** - you'll need them during Phase 2 deployment.
-
-If you're not using Twingate, you can:
-- Remove Twingate from the network stack
-- Use a different VPN solution
-- Expose services publicly (not recommended for production)
+Auth keys are enrollment tickets, not runtime credentials: enrolled devices
+are unaffected when the key expires.
 
 ### GitHub SSH Key (for GitOps)
 
-ArgoCD needs access to your Git repository.
-
-#### Generate Deploy Key
+ArgoCD reads this repository over SSH.
 
 ```bash
-ssh-keygen -t rsa -b 4096 -C "argocd@yourdomain.com" -f ~/.ssh/argocd_deploy_key
+ssh-keygen -t ed25519 -f ~/.ssh/argocd_deploy_key -N ''
 ```
 
-#### Add to GitHub
-
-1. Go to your repository → **Settings** → **Deploy keys**
-2. Click **Add deploy key**
-3. Title: `ArgoCD Deploy Key`
-4. Key: Paste contents of `~/.ssh/argocd_deploy_key.pub`
-5. Check **Allow write access** if you want ArgoCD to sync back (optional)
-
-#### Configure ArgoCD
-
-After ArgoCD is installed, add the private key:
+Add `~/.ssh/argocd_deploy_key.pub` under the repository's **Settings** →
+**Deploy keys** (read-only). After ArgoCD is installed, register it as a
+repository secret:
 
 ```bash
-kubectl create secret generic argocd-repo-key \
-  --namespace=argocd \
+kubectl -n argocd create secret generic repo-infra-k8s \
+  --from-literal=type=git \
+  --from-literal=url=git@github.com:<org>/<repo>.git \
   --from-file=sshPrivateKey=$HOME/.ssh/argocd_deploy_key
+kubectl -n argocd label secret repo-infra-k8s argocd.argoproj.io/secret-type=repository
 ```
-
-Then configure the repository in ArgoCD (via UI or CLI).
 
 ## Pre-Deployment Checklist
 
-Before starting deployment, ensure you have:
-
-- [ ] VPS/bare metal servers provisioned with Ubuntu 22.04+
-- [ ] SSH key-based authentication configured to all servers
-- [ ] SSH config file created with short aliases (n1, n2, etc.)
-- [ ] Ansible installed on local machine
-- [ ] kubectl installed on local machine
-- [ ] Domain registered and DNS pointing to Cloudflare
-- [ ] Cloudflare API token created with DNS edit permissions
-- [ ] Wildcard DNS record (*.yourdomain.com) created
-- [ ] Twingate connector and tokens (if using)
-- [ ] GitHub deploy key configured (if using private repo)
-- [ ] Ansible inventory configured with SSH aliases
-- [ ] Customized `components/*/root.yaml` files with your domain
-
-## Next Steps
-
-Once all prerequisites are met, proceed to:
-1. **BOOTSTRAP.md** - Detailed deployment guide
-2. **README.md** - Overview and quick start
+- [ ] Debian 13 servers with public IPs and root SSH access
+- [ ] `~/.ssh/config` aliases and `ansible/inventory.ini`
+- [ ] Ansible, kubectl and Tailscale on the workstation
+- [ ] Domain on Cloudflare, API token with DNS edit permission
+- [ ] Edge name with one A record per edge node
+- [ ] Tailnet with the ACL applied, a tagged auth key and an operator OAuth client
+- [ ] Deploy key on the repository
+- [ ] Domains and `repoURL` set in `components/*/values.yaml` and the `root.yaml` files
 
 ## Troubleshooting
 
 ### SSH Connection Issues
 
 ```bash
-# Test SSH connection
-ssh -v n1
-
-# Check SSH config syntax
-ssh -G n1
-
-# Verify SSH key permissions
-ls -la ~/.ssh/id_rsa
-# Should be 600 or 400
+ssh -v n1        # verbose connection
+ssh -G n1        # resolved config for the alias
+ls -la ~/.ssh/id_rsa   # must be 600 or 400
 ```
 
 ### Ansible Connection Issues
 
 ```bash
-# Test Ansible connectivity
-ansible all -i ansible/inventory.ini -m ping
-
-# Run with verbose output
-ansible all -i ansible/inventory.ini -m ping -vvv
-
-# Test with specific user
-ansible all -i ansible/inventory.ini -m ping -u root
+cd ansible
+ansible all -m ping
+ansible all -m ping -vvv
 ```
 
 ### Domain/DNS Issues
 
 ```bash
-# Verify nameservers
 dig NS yourdomain.com
-
-# Verify A record
-dig A yourdomain.com
-
-# Verify wildcard
-dig test.yourdomain.com
-
-# Check Cloudflare API access
-curl -X GET "https://api.cloudflare.com/client/v4/zones" \
-     -H "Authorization: Bearer YOUR_TOKEN" | jq .
+dig A <edge name>.yourdomain.com
+curl -s "https://api.cloudflare.com/client/v4/zones" -H "Authorization: Bearer <TOKEN>" | jq '.result[].name'
 ```
 
 ### Firewall Issues
 
-Ensure these ports are open on all nodes:
-
 ```bash
-# Check if ports are listening
-sudo ss -tulnp | grep -E ':(80|443|6443|2379|2380|10250)'
+# Listening ports on a node
+ss -tulnp | grep -E ':(80|443|6443|2379|2380|10250)'
 
-# Check firewall rules (Ubuntu/Debian)
-sudo ufw status
-
-# Check firewall rules (RHEL/CentOS)
-sudo firewall-cmd --list-all
+# The node firewall table
+nft list table inet node_firewall
 ```
-
-## Support
-
-For questions or issues with prerequisites:
-- Review this document thoroughly
-- Check Ansible documentation: https://docs.ansible.com/
-- Check Kubernetes documentation: https://kubernetes.io/docs/
-- Review Cloudflare API docs: https://developers.cloudflare.com/api/

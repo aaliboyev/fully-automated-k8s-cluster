@@ -4,12 +4,20 @@ vmagent:
   spec:
     scrapeInterval: "30s"
     replicaCount: 1
+    # kube-apiserver /metrics is larger than the 16MiB default.
+    extraArgs:
+      promscrape.maxScrapeSize: 64MiB
     # Let the stack install Kubernetes scrape configs for kubelet, apiserver, etc.
     # It ships a bunch of sane defaults for k8s components.
 
 # operator itself
 victoria-metrics-operator:
   enabled: false
+
+# vmalert's -external.url (alert source links) is derived from this.
+external:
+  grafana:
+    host: https://grafana.example.com
 
 # alerts
 vmalert:
@@ -20,20 +28,269 @@ vmalert:
 
 alertmanager:
   enabled: true
-  alertmanagerSpec:
+  spec:
     replicaCount: 1
-    # Later: configure receivers for email/Telegram/etc.
+    # Routing and receivers live in this Secret, not here: it carries a bot
+    # token and a chat id, and this repo is treated as public. Same rule as
+    # the app secrets. Managed out of band; only the reference is in git.
+    #
+    # Note this key is `spec`, not `alertmanagerSpec` — the chart renamed it,
+    # and the old block was being ignored in full.
+    configSecret: alertmanager-config
+
+# Upstream dashboards: only the deep-debugging references stay, in their own
+# folder. Our own dashboards come from components/observability/dashboards.
+defaultDashboards:
+  annotations:
+    grafana_folder: Reference
+  sources:
+    kube-prometheus:
+      enabled: false
+    kubernetes-views-global:
+      enabled: false
+    kubernetes-views-namespaces:
+      enabled: false
+    kubernetes-views-pods:
+      enabled: false
+    kubernetes-views-nodes:
+      enabled: false
+    kubernetes-system-coredns:
+      enabled: false
+    victoriametrics-vmalert:
+      enabled: false
+    victoriametrics-operator:
+      enabled: false
+    victorialogs-vlagent:
+      enabled: false
 
 # dashboards
 grafana:
   enabled: true
   replicaCount: 1
-#  persistence:
-#    enabled: true
-#    size: 10Gi
-#    storageClassName: longhorn
-#  sidecar:
-#    dashboards:
-#      enabled: true
-#    datasources:
-#      enabled: true
+  resources: {requests: {memory: 768Mi}, limits: {memory: 2Gi}}
+  initChownData:
+    resources: {requests: {memory: 32Mi}, limits: {memory: 64Mi}}
+  # Generic platform capabilities only — no app-specific config here.
+  # Dashboards (ConfigMap, label grafana_dashboard) and datasources (Secret,
+  # label grafana_datasource) are discovered cluster-wide and hot-loaded.
+  # This cluster's dashboards, apps included, are generated from
+  # components/observability/dashboards; apps keep their datasources.
+  plugins:
+    - grafana-clickhouse-datasource
+    - victoriametrics-logs-datasource
+  sidecar:
+    # Shared by the dashboard and datasource sidecars.
+    resources: {requests: {memory: 128Mi}, limits: {memory: 256Mi}}
+    dashboards:
+      searchNamespace: ALL
+      # ConfigMaps name their folder in this annotation (ours: Cluster, Apps;
+      # the upstream ones kept below: Reference).
+      folderAnnotation: grafana_folder
+      provider:
+        foldersFromFilesStructure: true
+    datasources:
+      searchNamespace: ALL
+  # Users, passwords, API tokens and dashboards made in the UI live in a local
+  # sqlite db, so without a volume every rollout resets them and admin falls
+  # back to the chart Secret. RWO needs the old pod gone first, hence Recreate.
+  persistence:
+    enabled: true
+    existingClaim: grafana-data
+  deploymentStrategy:
+    type: Recreate
+  # The chart mints a random admin password on every render, so each sync
+  # rotated it out from under the db above. The dashboard sidecar logs in as
+  # admin, and a mismatch locks the account out. Same out-of-band secret as
+  # alertmanager: only the reference is in git.
+  admin:
+    existingSecret: grafana-admin
+  # SSO through Zitadel (app `grafana`).
+  # The local admin login stays as break-glass. Client secret:
+  # observability/grafana-zitadel, copied from the Zitadel console.
+  envFromSecret: grafana-zitadel
+  grafana.ini:
+    server:
+      root_url: https://grafana.example.com
+    dashboards:
+      default_home_dashboard_path: /var/lib/grafana/dashboards/default/Cluster/home.json
+    # Links users created before Zitadel by their email. Safe
+    # here: Zitadel only issues verified emails for our own org.
+    auth:
+      oauth_allow_insecure_email_lookup: true
+    auth.generic_oauth:
+      enabled: true
+      name: Zitadel
+      icon: signin
+      client_id: "<grafana-client-id>"
+      scopes: openid profile email
+      empty_scopes: false
+      auth_url: https://id.example.com/oauth/v2/authorize
+      token_url: https://id.example.com/oauth/v2/token
+      api_url: https://id.example.com/oidc/v1/userinfo
+      auth_style: InHeader
+      use_pkce: true
+      login_attribute_path: preferred_username
+      name_attribute_path: name
+      # Project roles arrive as an object keyed by role name.
+      role_attribute_path: contains(keys("urn:zitadel:iam:org:project:roles" || `{}`), 'admin') && 'GrafanaAdmin' || 'Viewer'
+      role_attribute_strict: true
+      allow_assign_grafana_admin: true
+      auto_login: false
+promscrape:
+  dropOriginalLabels: false
+
+# HTTPRoute hostnames as a metric, so dashboards can show a route's domain
+# next to the gateway's traffic for it.
+kube-state-metrics:
+  resources: {requests: {memory: 192Mi}, limits: {memory: 320Mi}}
+  rbac:
+    extraRules:
+      - apiGroups: [gateway.networking.k8s.io]
+        resources: [httproutes]
+        verbs: [list, watch]
+  customResourceState:
+    enabled: true
+    config:
+      spec:
+        resources:
+          - groupVersionKind:
+              group: gateway.networking.k8s.io
+              version: v1
+              kind: HTTPRoute
+            metricNamePrefix: gateway_httproute
+            labelsFromPath:
+              namespace: [metadata, namespace]
+              httproute: [metadata, name]
+            metrics:
+              - name: hostname_info
+                help: A hostname the HTTPRoute serves.
+                each:
+                  type: Info
+                  info:
+                    path: [spec, hostnames]
+                    labelsFromPath:
+                      hostname: []
+
+# Node Exporter: stamp the Kubernetes node name onto every series.
+# By default node-exporter metrics only carry `instance` (IP:port), so the
+# prometheus-adapter cannot map them to node objects and `kubectl top nodes`
+# / node CPU+mem HPAs return no data. Copying __meta_kubernetes_pod_node_name
+# into a `node` label fixes that (mirrors the kube-prometheus-stack default).
+# NOTE: overriding endpoints replaces the chart default, so the upstream
+# mountpoint drop rule is re-declared here to keep it.
+prometheus-node-exporter:
+  resources: {requests: {memory: 64Mi}, limits: {memory: 128Mi}}
+  vmScrape:
+    spec:
+      endpoints:
+        - port: metrics
+          relabelConfigs:
+            - action: replace
+              source_labels: [__meta_kubernetes_pod_node_name]
+              target_label: node
+          metricRelabelConfigs:
+            - action: drop
+              source_labels: [mountpoint]
+              regex: "/var/lib/kubelet/pods.+"
+
+# Control plane on kubeadm: etcd accepts only its own CA's client certs on
+# 2379, so the scrape presents the healthcheck client pair from the
+# out-of-band `etcd-client` secret (ca.crt, client.crt, client.key copied
+# from node2's /etc/kubernetes/pki/etcd). Scheduler and controller-manager
+# serve self-signed TLS on ports kubeadm binds to loopback by default; the
+# manifests on node2 bind 0.0.0.0 (also in kubeadm-config's extraArgs so an
+# upgrade keeps it), and the bearer token carries the authorization.
+kubeEtcd:
+  vmScrape:
+    spec:
+      endpoints:
+        - port: http-metrics
+          scheme: https
+          tlsConfig:
+            ca:
+              secret:
+                name: etcd-client
+                key: ca.crt
+            cert:
+              secret:
+                name: etcd-client
+                key: client.crt
+            keySecret:
+              name: etcd-client
+              key: client.key
+kubeScheduler:
+  vmScrape:
+    spec:
+      endpoints:
+        - bearerTokenFile: /var/run/secrets/kubernetes.io/serviceaccount/token
+          port: http-metrics
+          scheme: https
+          tlsConfig:
+            insecureSkipVerify: true
+kubeControllerManager:
+  vmScrape:
+    spec:
+      endpoints:
+        - bearerTokenFile: /var/run/secrets/kubernetes.io/serviceaccount/token
+          port: http-metrics
+          scheme: https
+          tlsConfig:
+            insecureSkipVerify: true
+
+# Data on a claim we own (extraObjects) instead of the operator-made one.
+vmsingle:
+  spec:
+    storage: null
+    storageDataPath: /victoria-metrics-data
+    volumes:
+      - name: data
+        persistentVolumeClaim:
+          claimName: vmsingle-data
+    volumeMounts:
+      - name: data
+        mountPath: /victoria-metrics-data
+
+# Logs are worth having but not worth replicating: one copy on node5's large
+# disk, capped below the volume so retention never fills it.
+vlsingle:
+  enabled: true
+  spec:
+    retentionPeriod: 30d
+    extraArgs:
+      retention.maxDiskSpaceUsageBytes: 50GiB
+    storage:
+      storageClassName: local-fast
+      resources:
+        requests:
+          storage: 60Gi
+
+# Container log collector on every node, writing into vlsingle.
+vlagent:
+  enabled: true
+  spec:
+    tolerations:
+      - operator: Exists
+
+extraObjects:
+  - apiVersion: v1
+    kind: PersistentVolumeClaim
+    metadata:
+      name: grafana-data
+      namespace: observability
+    spec:
+      storageClassName: replicated
+      accessModes: [ReadWriteOnce]
+      resources:
+        requests:
+          storage: 5Gi
+  - apiVersion: v1
+    kind: PersistentVolumeClaim
+    metadata:
+      name: vmsingle-data
+      namespace: observability
+    spec:
+      storageClassName: replicated
+      accessModes: [ReadWriteOnce]
+      resources:
+        requests:
+          storage: 20Gi

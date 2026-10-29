@@ -1,0 +1,84 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: vector-config
+  namespace: {{ .Release.Namespace }}
+data:
+  vector.yaml: |
+    data_dir: /var/lib/vector
+    # Files from secret flow-history-clickhouse (Vector doesn't read env in config).
+    secret:
+      clickhouse:
+        type: directory
+        path: /etc/vector-secrets
+    sources:
+      # Cilium renames events.log to events-<time>.log at 50 MB and keeps five.
+      # Files are tracked by a checksum of their first line, so a renamed file
+      # keeps its checkpoint and is read to the end. No oldest_first: it reads
+      # a whole file per pass, which a 50 MB backlog doesn't fit in memory.
+      hubble:
+        type: file
+        include: [/var/run/cilium/hubble/events*.log]
+        file_key: ""
+        host_key: ""
+    transforms:
+      # One row per flow; agent events and other records are dropped.
+      flows:
+        type: remap
+        inputs: [hubble]
+        source: |
+          event = object(parse_json(.message) ?? {}) ?? {}
+          f = object(event.flow) ?? {}
+          if !exists(f.time) { abort }
+          l4 = object(f.l4) ?? {}
+          protocol = string(keys(l4)[0]) ?? ""
+          p = object(get(l4, [protocol]) ?? {}) ?? {}
+          tcp_flags = join(keys(object(p.flags) ?? {}), ",")
+          src_workloads = array(f.source.workloads) ?? []
+          dst_workloads = array(f.destination.workloads) ?? []
+          . = compact({
+            "time": f.time,
+            "node": f.node_name,
+            "verdict": f.verdict,
+            "drop_reason": f.drop_reason_desc,
+            "direction": f.traffic_direction,
+            "is_reply": f.is_reply,
+            "src_ip": f.IP.source,
+            "dst_ip": f.IP.destination,
+            "protocol": protocol,
+            "src_port": p.source_port,
+            "dst_port": p.destination_port,
+            "tcp_flags": tcp_flags,
+            "icmp_type": p.type,
+            "src_namespace": f.source.namespace,
+            "src_pod": f.source.pod_name,
+            "src_workload": src_workloads[0].name,
+            "dst_namespace": f.destination.namespace,
+            "dst_pod": f.destination.pod_name,
+            "dst_workload": dst_workloads[0].name,
+            "dst_service": f.destination_service.name,
+            "dst_service_namespace": f.destination_service.namespace
+          })
+    sinks:
+      clickhouse:
+        type: clickhouse
+        inputs: [flows]
+        endpoint: http://clickhouse:8123
+        database: hubble
+        table: flows
+        auth:
+          strategy: basic
+          user: vector
+          password: SECRET[clickhouse.vector-password]
+        skip_unknown_fields: true
+        date_time_best_effort: true
+        # Few, larger inserts: every node writes its own batches. Batches and
+        # requests in flight are capped so a backlog fits the memory limit.
+        batch:
+          max_bytes: 4000000
+          timeout_secs: 10
+        request:
+          concurrency: 2
+        # Checkpoints advance only after ClickHouse accepted the batch.
+        acknowledgements:
+          enabled: true

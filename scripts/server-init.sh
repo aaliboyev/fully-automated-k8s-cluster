@@ -31,7 +31,10 @@ apt-get install -y \
   apt-transport-https \
   gnupg \
   lsb-release \
-  iptables ipset conntrack ebtables arptables ipset ipvsadm tcpdump bpftool iproute2 nftables
+  iptables ipset conntrack ebtables arptables ipset ipvsadm tcpdump iproute2 nftables
+
+# Install bpftool from linux-tools (Ubuntu-specific)
+apt-get install -y linux-tools-common linux-tools-generic || true
 
 echo "[*] Ensuring NTP time sync is enabled..."
 apt-get install -y systemd-timesyncd
@@ -61,7 +64,7 @@ net.bridge.bridge-nf-call-iptables = 1
 net.bridge.bridge-nf-call-ip6tables = 1
 net.ipv4.ip_forward = 1
 EOF
-cat >/etc/sysctl.d/99-calico.conf <<'EOF'
+cat >/etc/sysctl.d/99-pod-network.conf <<'EOF'
 net.ipv4.ip_forward = 1
 net.ipv4.conf.all.rp_filter = 0
 net.ipv4.conf.default.rp_filter = 0

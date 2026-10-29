@@ -13,7 +13,7 @@ spec:
   sources:
     - repoURL: https://victoriametrics.github.io/helm-charts
       chart: victoria-metrics-operator
-      targetRevision: 0.56.4
+      targetRevision: 0.68.1
       helm:
         valueFiles:
           - $values/components/observability/values/operator.yaml

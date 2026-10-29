@@ -129,10 +129,6 @@
           ArgoCD installed successfully!
           =============================================================================
           
-          Access ArgoCD UI:
-          - HTTP:  http://<node-ip>:30080
-          - HTTPS: https://<node-ip>:30443
-          
           Login credentials:
           - Username: admin
           - Password: {{ argocd_password.stdout if argocd_password_encoded.rc == 0 else 'See below' }}
@@ -151,5 +147,5 @@
           chmod +x /usr/local/bin/argocd
           
           To login via CLI:
-          argocd login <node-ip>:30080 --username admin --password <password> --insecure
+          argocd login --port-forward --port-forward-namespace {{ argocd_namespace }} --username admin --password <password>
           =============================================================================

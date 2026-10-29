@@ -1,0 +1,136 @@
+# Probes every public hostname on the HAProxy edge through public DNS, so a
+# dead controller, a missed certificate renewal or a dropped route alerts even
+# with no traffic. Alerts on HAProxy's own metrics sit next to them.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: blackbox-exporter
+  namespace: observability
+data:
+  blackbox.yml: |
+    modules:
+      https:
+        prober: http
+        timeout: 10s
+        http:
+          preferred_ip_protocol: ip4
+          # Root paths of some apps answer redirects or auth challenges.
+          valid_status_codes: [200, 301, 302, 307, 401]
+          no_follow_redirects: true
+          fail_if_not_ssl: true
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: blackbox-exporter
+  namespace: observability
+spec:
+  replicas: 1
+  selector:
+    matchLabels: {app.kubernetes.io/name: blackbox-exporter}
+  template:
+    metadata:
+      labels: {app.kubernetes.io/name: blackbox-exporter}
+      annotations:
+        checksum/config: {{ .Files.Get "templates/70-edge-probe.yaml" | sha256sum | trunc 12 }}
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65534
+        seccompProfile: {type: RuntimeDefault}
+      containers:
+        - name: blackbox-exporter
+          image: prom/blackbox-exporter:v0.29.0
+          args: [--config.file=/etc/blackbox/blackbox.yml]
+          ports:
+            - {name: http, containerPort: 9115}
+          readinessProbe:
+            httpGet: {path: /-/healthy, port: http}
+          resources:
+            requests: {cpu: 10m, memory: 32Mi}
+            limits: {memory: 128Mi}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: {drop: [ALL]}
+          volumeMounts:
+            - {name: config, mountPath: /etc/blackbox, readOnly: true}
+      volumes:
+        - name: config
+          configMap: {name: blackbox-exporter}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: blackbox-exporter
+  namespace: observability
+spec:
+  selector: {app.kubernetes.io/name: blackbox-exporter}
+  ports:
+    - {name: http, port: 9115, targetPort: http}
+---
+apiVersion: operator.victoriametrics.com/v1beta1
+kind: VMProbe
+metadata:
+  name: public-edge
+  namespace: observability
+  annotations:
+    argocd.argoproj.io/sync-wave: "3"
+spec:
+  jobName: public-edge
+  module: https
+  interval: 30s
+  vmProberSpec:
+    url: blackbox-exporter.observability.svc:9115
+  targets:
+    staticConfig:
+      targets:
+        - https://app.example.com/healthz
+        - https://id.example.com/.well-known/openid-configuration
+---
+apiVersion: operator.victoriametrics.com/v1beta1
+kind: VMRule
+metadata:
+  name: public-edge
+  namespace: observability
+  annotations:
+    argocd.argoproj.io/sync-wave: "3"
+spec:
+  groups:
+    - name: public-edge
+      rules:
+        - alert: PublicHostnameDown
+          expr: probe_success{job="public-edge"} == 0
+          for: 3m
+          labels: {severity: critical}
+          annotations:
+            summary: "{{`{{ $labels.instance }}`}} fails its probe through the public edge"
+        - alert: PublicCertificateExpiring
+          expr: probe_ssl_earliest_cert_expiry{job="public-edge"} - time() < 14 * 86400
+          for: 1h
+          labels: {severity: warning}
+          annotations:
+            summary: "{{`{{ $labels.instance }}`}} serves a certificate that expires within 14 days"
+        # The controller runs under gopherd inside the pod, so its restarts
+        # never show as pod restarts.
+        - alert: HaproxyControllerRestarted
+          expr: changes(process_start_time_seconds{job="network/haproxy-public", endpoint="metrics"}[15m]) > 0
+          labels: {severity: warning}
+          annotations:
+            summary: "HAProxy edge controller restarted inside {{`{{ $labels.pod }}`}}"
+        - alert: HaproxyBackendWithoutServers
+          expr: sum by (proxy) (haproxy_server_status{job="network/haproxy-public", state="UP"}) == 0
+          for: 5m
+          labels: {severity: warning}
+          annotations:
+            summary: "HAProxy backend {{`{{ $labels.proxy }}`}} has no server up"
+        - alert: HaproxyHigh5xxRate
+          expr: |
+            sum(rate(haproxy_backend_http_responses_total{job="network/haproxy-public", code="5xx"}[5m]))
+              / sum(rate(haproxy_backend_http_responses_total{job="network/haproxy-public"}[5m])) > 0.05
+            and sum(rate(haproxy_backend_http_responses_total{job="network/haproxy-public"}[5m])) > 0.2
+          for: 10m
+          labels: {severity: warning}
+          annotations:
+            summary: "More than 5% of requests through the HAProxy edge end in 5xx"

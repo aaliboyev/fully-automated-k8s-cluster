@@ -80,14 +80,15 @@
         - needs_upgrade
         - inventory_hostname == groups['control_plane'][0]
 
+    # Cilium replaces kube-proxy; without the skip the addon comes back.
     - name: Apply kubeadm upgrade on first control plane
-      command: kubeadm upgrade apply {{ kubernetes_version }} --yes
+      command: kubeadm upgrade apply {{ kubernetes_version }} --yes --skip-phases=addon/kube-proxy
       when:
         - needs_upgrade
         - inventory_hostname == groups['control_plane'][0]
 
     - name: Upgrade additional control plane nodes
-      command: kubeadm upgrade node
+      command: kubeadm upgrade node --skip-phases=addon/kube-proxy
       when:
         - needs_upgrade
         - inventory_hostname != groups['control_plane'][0]
@@ -220,7 +221,7 @@
     # Upgrade node config
     # -------------------------------------------------------------------------
     - name: Upgrade kubeadm node config
-      command: kubeadm upgrade node
+      command: kubeadm upgrade node --skip-phases=addon/kube-proxy
       when: needs_upgrade
 
     # -------------------------------------------------------------------------

@@ -1,0 +1,6 @@
+apiVersion: v2
+name: buildkit
+description: A Helm chart for BuildKit - a toolkit for converting source code to build artifacts
+type: application
+version: 1.0.0
+appVersion: "v0.17.1"

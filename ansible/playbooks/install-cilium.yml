@@ -1,0 +1,97 @@
+---
+# =============================================================================
+# Install or upgrade Cilium with Helm (values in ansible/cilium/).
+# Usage: ansible-playbook -i inventory.ini playbooks/install-cilium.yml
+#        ... -e cilium_routing=tunnel   # VXLAN fallback (values-tunnel.yaml)
+# =============================================================================
+- name: Install Cilium
+  hosts: control_plane[0]
+  become: yes
+  gather_facts: no
+  environment:
+    KUBECONFIG: /etc/kubernetes/admin.conf
+
+  vars:
+    cilium_values_dir: "{{ playbook_dir }}/../cilium"
+    cilium_routing: native
+
+  tasks:
+    - name: Check if Helm is installed
+      command: which helm
+      register: helm_check
+      failed_when: false
+      changed_when: false
+
+    - name: Install Helm
+      shell: curl https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash
+      when: helm_check.rc != 0
+
+    - name: Add Cilium Helm repository
+      command: helm repo add cilium https://helm.cilium.io
+      register: helm_repo_add
+      changed_when: "'already exists' not in helm_repo_add.stdout"
+      failed_when: false
+
+    - name: Update Helm repositories
+      command: helm repo update cilium
+      changed_when: false
+
+    - name: Copy Cilium values
+      copy:
+        src: "{{ cilium_values_dir }}/{{ item }}"
+        dest: "/tmp/cilium-{{ item }}"
+        mode: '0644'
+      loop: [values.yaml, values-tunnel.yaml]
+
+    - name: Install or upgrade Cilium
+      command: >-
+        helm upgrade --install cilium cilium/cilium
+        --version {{ cilium_version }}
+        --namespace kube-system
+        -f /tmp/cilium-values.yaml
+        {{ '-f /tmp/cilium-values-tunnel.yaml' if cilium_routing == 'tunnel' else '' }}
+      changed_when: true
+
+    - name: Wait for the Cilium operator
+      command: kubectl -n kube-system rollout status deployment/cilium-operator --timeout=5m
+      changed_when: false
+
+    - name: Wait for the Cilium agents
+      command: kubectl -n kube-system rollout status daemonset/cilium --timeout=10m
+      changed_when: false
+
+# tailscaled sets src_valid_mark=1, so the source check of a packet Cilium marks
+# for its L7/DNS proxy (0x200, table 2004 = all local) sees a local source and
+# drops it as a martian: proxied pod traffic and Envoy's replies from the
+# internet both die. Source checks run with iif lo; send those to main.
+- name: Route proxy source checks through the main table
+  hosts: k8s
+  become: yes
+  gather_facts: no
+
+  tasks:
+    - name: Install cilium-proxy-rpcheck.service
+      copy:
+        dest: /etc/systemd/system/cilium-proxy-rpcheck.service
+        mode: '0644'
+        content: |
+          [Unit]
+          Description=Main-table source checks for Cilium proxy-marked packets
+          After=network-online.target
+          Wants=network-online.target
+
+          [Service]
+          Type=oneshot
+          RemainAfterExit=yes
+          ExecStart=/bin/sh -c 'ip rule del pref 8 2>/dev/null; ip rule add pref 8 iif lo fwmark 0x200/0xf00 lookup main'
+          ExecStop=/bin/sh -c 'ip rule del pref 8 2>/dev/null; true'
+
+          [Install]
+          WantedBy=multi-user.target
+
+    - name: Enable and start it
+      systemd:
+        name: cilium-proxy-rpcheck.service
+        enabled: yes
+        state: restarted
+        daemon_reload: yes

@@ -1,0 +1,154 @@
+---
+# =============================================================================
+# Update the kernel with matching headers (DRBD's module is built against them)
+# Usage: ansible-playbook -i inventory.ini playbooks/update-kernel.yml --limit node3
+#        add -e upgrade_packages=true to also apt upgrade (holds kept) and reboot
+#
+# One node at a time: install, and if the newest kernel isn't running or
+# packages changed, drain, reboot, wait Ready, uncordon, then wait for
+# storage, Harbor and node_health_urls to recover before the next node.
+# =============================================================================
+- name: Update kernel
+  hosts: k8s
+  become: yes
+  serial: 1
+  gather_facts: no
+
+  vars:
+    linstor_namespace: piraeus-datastore
+    harbor_namespace: harbor
+    upgrade_packages: false
+    replicas_check: >-
+      kubectl -n {{ linstor_namespace }} exec deploy/linstor-controller --
+      linstor -m resource list
+      | python3 {{ playbook_dir }}/files/check-replicas.py {{ inventory_hostname }}
+
+  tasks:
+    # A reboot must never take away the last good copy of a volume.
+    - name: Another UpToDate replica for every volume on this node
+      shell: "{{ replicas_check }} before"
+      delegate_to: localhost
+      become: no
+      changed_when: false
+
+    - name: Upgrade packages
+      apt:
+        upgrade: safe
+        update_cache: yes
+      when: upgrade_packages | bool
+      register: packages
+
+    - name: Install kernel and headers metapackages
+      apt:
+        name:
+          - linux-image-amd64
+          - linux-headers-amd64
+        state: latest
+        update_cache: yes
+
+    - name: Running kernel
+      command: uname -r
+      register: kernel_running
+      changed_when: false
+
+    - name: Newest installed kernel
+      shell: ls /boot/vmlinuz-* | sed 's|/boot/vmlinuz-||' | sort -V | tail -1
+      register: kernel_newest
+      changed_when: false
+
+    - name: Skip nodes already on the newest kernel with no package changes
+      meta: end_host
+      when: kernel_running.stdout == kernel_newest.stdout and packages is not changed
+
+    - name: Headers for the newest kernel present
+      stat:
+        path: "/lib/modules/{{ kernel_newest.stdout }}/build"
+      register: headers
+      failed_when: not headers.stat.exists
+
+    - name: Drain node
+      command: >
+        kubectl drain {{ inventory_hostname }}
+        --ignore-daemonsets --delete-emptydir-data --timeout=10m
+      delegate_to: localhost
+      become: no
+      when: not (skip_drain | default(false) | bool)
+
+    - name: Reboot
+      reboot:
+        reboot_timeout: 900
+
+    - name: Wait for node Ready
+      command: >
+        kubectl wait node/{{ inventory_hostname }}
+        --for=condition=Ready --timeout=10m
+      delegate_to: localhost
+      become: no
+      changed_when: false
+      # The API server is unreachable while a control-plane node reboots.
+      register: node_ready
+      retries: 30
+      delay: 10
+      until: node_ready.rc == 0
+
+    - name: Uncordon node
+      command: kubectl uncordon {{ inventory_hostname }}
+      delegate_to: localhost
+      become: no
+      register: uncordon
+      retries: 10
+      delay: 10
+      until: uncordon.rc == 0
+
+    - name: LINSTOR satellite online
+      shell: >-
+        kubectl -n {{ linstor_namespace }} exec deploy/linstor-controller --
+        linstor -m node list --nodes {{ inventory_hostname }}
+        | python3 -c 'import json,sys; sys.exit(json.load(sys.stdin)[0][0]["connection_status"] != "ONLINE")'
+      delegate_to: localhost
+      become: no
+      changed_when: false
+      register: satellite
+      retries: 30
+      delay: 20
+      until: satellite.rc == 0
+
+    - name: This node's replicas resynced
+      shell: "{{ replicas_check }} after"
+      delegate_to: localhost
+      become: no
+      changed_when: false
+      register: replicas
+      retries: 90
+      delay: 20
+      until: replicas.rc == 0
+
+    # containerd doesn't fall back past Harbor on HTTP errors, so a crash-looping
+    # Harbor blocks image pulls on the rebooted node.
+    - name: Harbor workloads available
+      shell: >-
+        for r in $(kubectl -n {{ harbor_namespace }} get deploy,sts -o name); do
+        kubectl -n {{ harbor_namespace }} rollout status "$r" --timeout=10m || exit 1; done
+      delegate_to: localhost
+      become: no
+      changed_when: false
+
+    - name: Health endpoints respond
+      uri:
+        url: "{{ item }}"
+      loop: "{{ node_health_urls | default([]) }}"
+      delegate_to: localhost
+      become: no
+      register: health
+      retries: 30
+      delay: 10
+      until: health.status == 200
+
+    - name: Report
+      command: uname -r
+      register: kernel_after
+      changed_when: false
+
+    - name: Kernel now
+      debug:
+        msg: "{{ kernel_running.stdout }} -> {{ kernel_after.stdout }}"

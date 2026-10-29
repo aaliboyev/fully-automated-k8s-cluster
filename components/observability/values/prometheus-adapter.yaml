@@ -1,0 +1,57 @@
+# prometheus-adapter — serves the Kubernetes Metrics API (metrics.k8s.io)
+# from data already scraped by VictoriaMetrics, so `kubectl top` and CPU/memory
+# HPAs work without running a separate metrics-server (no duplicate scraping).
+#
+# Query backend: the vm-stack single-node VictoriaMetrics (Prometheus-compatible API).
+prometheus:
+  url: http://vmsingle-vm-stack-victoria-metrics-k8s-stack.observability.svc
+  port: 8428
+
+replicas: 1
+
+# Register the v1beta1.metrics.k8s.io APIService (this is what `kubectl top` reads).
+rules:
+  default: false
+  # Kubelet serves usage and working set on both /metrics/cadvisor and
+  # /metrics/resource; read one path or every pod counts twice. The resource
+  # path also covers pods cadvisor reports without container labels (buildkit).
+  resource:
+    cpu:
+      containerQuery: |
+        sum by (<<.GroupBy>>) (
+          rate(container_cpu_usage_seconds_total{<<.LabelMatchers>>,metrics_path="/metrics/resource",container!="",pod!=""}[3m])
+        )
+      nodeQuery: |
+        sum by (<<.GroupBy>>) (
+          rate(node_cpu_seconds_total{<<.LabelMatchers>>,mode!="idle"}[3m])
+        )
+      resources:
+        overrides:
+          node: {resource: node}
+          namespace: {resource: namespace}
+          pod: {resource: pod}
+      containerLabel: container
+    memory:
+      containerQuery: |
+        sum by (<<.GroupBy>>) (
+          container_memory_working_set_bytes{<<.LabelMatchers>>,metrics_path="/metrics/resource",container!="",pod!=""}
+        )
+      nodeQuery: |
+        sum by (<<.GroupBy>>) (
+          node_memory_MemTotal_bytes{<<.LabelMatchers>>}
+          - node_memory_MemAvailable_bytes{<<.LabelMatchers>>}
+        )
+      resources:
+        overrides:
+          node: {resource: node}
+          namespace: {resource: namespace}
+          pod: {resource: pod}
+      containerLabel: container
+    window: 3m
+
+resources:
+  requests:
+    cpu: 50m
+    memory: 64Mi
+  limits:
+    memory: 128Mi

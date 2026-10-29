@@ -4,15 +4,14 @@
 # Global configuration
 global:
   # Domain for ArgoCD (optional, can be configured later)
-  domain: argocd.local
+  domain: argocd.example.com
 
 # Server configuration
 server:
-  # Expose ArgoCD server via NodePort for easy access
+  # Reached through the private Gateway's HTTPRoute; a NodePort would bypass the
+  # host firewall (the eBPF dataplane serves NodePorts before nftables).
   service:
-    type: NodePort
-    nodePortHttp: 30080
-    nodePortHttps: 30443
+    type: ClusterIP
   
   # Ingress configuration (disabled by default)
   ingress:
@@ -61,16 +60,113 @@ redis:
 dex:
   enabled: false
 
-# Notifications controller (optional)
+# Notifications controller. The telegram-token key is added to
+# argocd-notifications-secret out-of-band, so the chart must not own that secret.
+# Apps opt in with notifications.argoproj.io/subscribe.<trigger>.telegram: "<chat-id>".
 notifications:
   enabled: true
+  resources:
+    limits:
+      memory: 256Mi
+    requests:
+      memory: 96Mi
+  secret:
+    create: false
+  notifiers:
+    service.telegram: |
+      token: $telegram-token
+  # Links come from the app's spec.info: "repo" (source repo URL) and "image"
+  # (image repository, whose deployed tag is the release version). Telegram
+  # parses Markdown, so free-form text is escaped before it goes out.
+  argocdUrl: https://argocd.example.com
+  templates:
+    template.app-deployed: |
+      message: |
+        {{- $img := "" -}}{{- $repo := "" -}}
+        {{- range .app.spec.info -}}
+        {{- if eq .name "image" }}{{ $img = printf "%s:" .value }}{{ end -}}
+        {{- if eq .name "repo" }}{{ $repo = .value }}{{ end -}}
+        {{- end -}}
+        {{- $version := "" -}}
+        {{- range .app.status.summary.images -}}
+        {{- if and $img (hasPrefix $img .) }}{{ $version = regexReplaceAll "-.*$" (trimPrefix $img .) "" }}{{ end -}}
+        {{- end -}}
+        🚀 *Deployed* · {{ .app.metadata.name }}{{ if $version }} `{{ $version }}`{{ end }}
+        {{- if and $repo $version }}
+        📦 [release notes]({{ $repo }}/releases/tag/{{ $version }})
+        {{- end }}
+        🔎 [argocd]({{ .context.argocdUrl }}/applications/argocd/{{ .app.metadata.name }})
+    template.app-sync-failed: |
+      message: |
+        🔥 *Deploy failed* · {{ .app.metadata.name }}
+        {{ .app.status.operationState.message | replace "_" "\\_" | replace "*" "\\*" | replace "`" "\\`" | replace "[" "\\[" }}
+        🔎 [argocd]({{ .context.argocdUrl }}/applications/argocd/{{ .app.metadata.name }})
+    template.app-health-degraded: |
+      message: |
+        🩺 *Unhealthy* · {{ .app.metadata.name }} is {{ .app.status.health.status }}
+        🔎 [argocd]({{ .context.argocdUrl }}/applications/argocd/{{ .app.metadata.name }})
+  triggers:
+    trigger.on-deployed: |
+      - when: app.status.operationState != nil and app.status.operationState.phase in ['Succeeded'] and app.status.health.status == 'Healthy'
+        oncePer: app.status.sync.revisions
+        send: [app-deployed]
+    trigger.on-sync-failed: |
+      - when: app.status.operationState != nil and app.status.operationState.phase in ['Error', 'Failed']
+        send: [app-sync-failed]
+    trigger.on-health-degraded: |
+      - when: app.status.health.status == 'Degraded'
+        send: [app-health-degraded]
 
 # ApplicationSet controller (for managing multiple apps)
 applicationSet:
   enabled: true
+  resources:
+    limits:
+      memory: 256Mi
+    requests:
+      memory: 192Mi
 
 # Config management plugins
 configs:
   params:
     # Disable TLS for easier initial setup
     server.insecure: true
+    # Diff via server-side dry-run apply: API-server and CRD defaults (HTTPRoute
+    # backendRef weight/group/kind, StatefulSet claim templates) stop showing
+    # as permanent OutOfSync.
+    controller.diff.server.side: "true"
+  # SSO through Zitadel (apps `argocd` and `argocd-cli`);
+  # the local admin stays enabled as break-glass. clientSecret resolves from
+  # argocd-secret, copied from the Zitadel console.
+  cm:
+    url: https://argocd.example.com
+    # 3.x defaults, pinned so an upgrade can't flip them silently.
+    application.resourceTrackingMethod: annotation
+    # 3.0's default exclusions minus EndpointSlice, so hand-written
+    # EndpointSlices in git stay managed.
+    resource.exclusions: |
+      - apiGroups: [""]
+        kinds: [Endpoints]
+      - apiGroups: [coordination.k8s.io]
+        kinds: [Lease]
+      - apiGroups: [authentication.k8s.io, authorization.k8s.io]
+        kinds: [SelfSubjectReview, TokenReview, LocalSubjectAccessReview, SelfSubjectAccessReview, SelfSubjectRulesReview, SubjectAccessReview]
+      - apiGroups: [certificates.k8s.io]
+        kinds: [CertificateSigningRequest]
+      - apiGroups: [cert-manager.io]
+        kinds: [CertificateRequest]
+      - apiGroups: [wgpolicyk8s.io]
+        kinds: [PolicyReport, ClusterPolicyReport]
+    oidc.config: |
+      name: Zitadel
+      issuer: https://id.example.com
+      clientID: "<argocd-client-id>"
+      clientSecret: $oidc.zitadel.clientSecret
+      cliClientID: "<argocd-cli-client-id>"
+      requestedScopes: [openid, profile, email]
+  # Zitadel's role claim is an object, which Argo can't match as groups, so
+  # admins are listed by email.
+  rbac:
+    scopes: "[groups, email]"
+    policy.csv: |
+      g, admin@example.com, role:admin

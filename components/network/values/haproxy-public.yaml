@@ -1,0 +1,13 @@
+# Public edge on HAProxy Unified Gateway. Gateways of class public-v2 bind on
+# the node's 80/443.
+kind: DaemonSet
+hostNetwork: true
+# dns.example.com has an A record for each.
+affinity:
+  nodeAffinity:
+    requiredDuringSchedulingIgnoredDuringExecution:
+      nodeSelectorTerms:
+        - matchExpressions:
+            - {key: kubernetes.io/hostname, operator: In, values: [node3, node4]}
+gatewayClasses:
+  - name: public-v2

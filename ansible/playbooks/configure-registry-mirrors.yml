@@ -1,0 +1,95 @@
+---
+# =============================================================================
+# Pull ghcr.io and docker.io images through Harbor's proxy caches, falling back
+# to the upstream registry when Harbor is unreachable.
+# Usage: ansible-playbook -i inventory.ini playbooks/configure-registry-mirrors.yml --limit node1
+#
+# Harbor's projects are private: containerd authenticates as the cluster-pull
+# robot (read at run time from secret harbor/cluster-pull-robot) for the mirrors
+# and for images pushed to Harbor, so pods need no imagePullSecrets.
+# Restarting containerd keeps running containers.
+# =============================================================================
+- name: Configure registry mirrors
+  hosts: k8s
+  become: yes
+  serial: 1
+  gather_facts: no
+
+  vars:
+    harbor_host: harbor.example.com
+    pull_secret_namespace: harbor
+    mirrors:
+      - registry: ghcr.io
+        server: https://ghcr.io
+        project: ghcr-proxy
+      - registry: docker.io
+        server: https://registry-1.docker.io
+        project: docker-proxy
+
+  tasks:
+    - name: Read Harbor robot credentials
+      shell: >
+        kubectl -n {{ pull_secret_namespace }} get secret cluster-pull-robot
+        -o jsonpath='{.data.\.dockerconfigjson}' | base64 -d
+        | jq -r '.auths["{{ harbor_host }}"] | .auth // ((.username + ":" + .password) | @base64)'
+      register: harbor_auth
+      delegate_to: localhost
+      become: no
+      run_once: true
+      changed_when: false
+      no_log: true
+
+    - name: Point CRI at certs.d
+      replace:
+        path: /etc/containerd/config.toml
+        regexp: '(\[plugins\."io\.containerd\.grpc\.v1\.cri"\.registry\]\n\s+config_path = )""'
+        replace: '\1"/etc/containerd/certs.d"'
+      register: config_path
+
+    - name: Create hosts directories
+      file:
+        path: "/etc/containerd/certs.d/{{ item }}"
+        state: directory
+        mode: "0755"
+      loop: "{{ mirrors | map(attribute='registry') | list + [harbor_host] }}"
+
+    - name: Write Harbor hosts.toml
+      copy:
+        dest: "/etc/containerd/certs.d/{{ harbor_host }}/hosts.toml"
+        mode: "0600"
+        content: |
+          server = "https://{{ harbor_host }}"
+
+          [host."https://{{ harbor_host }}"]
+            capabilities = ["pull", "resolve"]
+            [host."https://{{ harbor_host }}".header]
+              authorization = "Basic {{ harbor_auth.stdout }}"
+      no_log: true
+
+    - name: Write mirror hosts.toml
+      copy:
+        dest: "/etc/containerd/certs.d/{{ item.registry }}/hosts.toml"
+        mode: "0600"
+        content: |
+          server = "{{ item.server }}"
+
+          [host."https://{{ harbor_host }}/v2/{{ item.project }}"]
+            capabilities = ["pull", "resolve"]
+            override_path = true
+            [host."https://{{ harbor_host }}/v2/{{ item.project }}".header]
+              authorization = "Basic {{ harbor_auth.stdout }}"
+      loop: "{{ mirrors }}"
+      no_log: true
+
+    - name: Restart containerd
+      systemd:
+        name: containerd
+        state: restarted
+      when: config_path.changed
+
+    - name: Wait for node Ready
+      command: >
+        kubectl wait --for=condition=Ready node/{{ inventory_hostname }} --timeout=5m
+      delegate_to: localhost
+      become: no
+      changed_when: false

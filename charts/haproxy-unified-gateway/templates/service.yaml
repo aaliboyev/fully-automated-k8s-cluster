@@ -1,0 +1,22 @@
+{{/*
+HUG appends one port per Gateway listener and keeps only the ports named
+stat and metrics, so those two names are fixed.
+*/}}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "hug.fullname" . }}
+  labels:
+    {{- include "hug.labels" . | nindent 4 }}
+    {{ include "hug.serviceLabelKey" . }}: {{ include "hug.serviceLabelValue" . }}
+spec:
+  type: ClusterIP
+  selector:
+    {{- include "hug.selectorLabels" . | nindent 4 }}
+  ports:
+    - name: stat
+      port: {{ .Values.ports.stats }}
+      targetPort: stat
+    - name: metrics
+      port: {{ .Values.ports.metrics }}
+      targetPort: metrics

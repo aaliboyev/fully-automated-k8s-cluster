@@ -1,0 +1,23 @@
+# Applies every deployed apps/*/root.yaml and components/*/root.yaml.
+# No prune and no resources finalizer: removing a file or this Application never deletes workloads.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: root
+  namespace: argocd
+spec:
+  project: default
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: argocd
+  source:
+    repoURL: git@github.com:your-org/your-infra-repo.git
+    targetRevision: main
+    path: .
+    directory:
+      recurse: true
+      include: '{apps/*/root.yaml,components/*/root.yaml}'
+  syncPolicy:
+    automated:
+      prune: false
+      selfHeal: true

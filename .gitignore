@@ -1,1 +1,7 @@
 .idea
+.DS_Store
+.tmp/
+
+.terraform/
+*.tfplan
+__pycache__/

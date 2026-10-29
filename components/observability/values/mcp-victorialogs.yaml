@@ -1,0 +1,4 @@
+fullnameOverride: mcp-victorialogs
+vl:
+  entrypoint: http://vlsingle-vm-stack-victoria-metrics-k8s-stack.observability.svc:9428
+resources: {requests: {memory: 128Mi}, limits: {memory: 192Mi}}

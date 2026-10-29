@@ -1,0 +1,16 @@
+repoURL: git@github.com:your-org/your-infra-repo.git
+
+piraeus:
+  chartVersion: 2.12.0
+  namespace: piraeus-datastore
+
+# Nodes that run a LINSTOR satellite and hold replicas.
+nodes:
+  - node2
+  - node1
+  - node3
+  - node4
+  - node5
+
+# Thin files on the root filesystem (no spare disks or LVM on the nodes).
+storagePool: data

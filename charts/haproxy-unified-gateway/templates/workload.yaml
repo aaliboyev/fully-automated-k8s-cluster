@@ -1,0 +1,122 @@
+{{- $hostNetwork := include "hug.hostNetwork" . -}}
+{{- $image := printf "%s:%s" .Values.image.repository (default .Chart.AppVersion .Values.image.tag) -}}
+{{- $containerSecurity := dict
+  "allowPrivilegeEscalation" false
+  "readOnlyRootFilesystem" true
+  "capabilities" (dict "drop" (list "ALL") "add" (list "NET_BIND_SERVICE"))
+-}}
+apiVersion: apps/v1
+kind: {{ .Values.kind }}
+metadata:
+  name: {{ include "hug.fullname" . }}
+  labels:
+    {{- include "hug.labels" . | nindent 4 }}
+spec:
+  {{- if eq .Values.kind "Deployment" }}
+  replicas: {{ .Values.replicas }}
+  {{- end }}
+  selector:
+    matchLabels:
+      {{- include "hug.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "hug.selectorLabels" . | nindent 8 }}
+    spec:
+      serviceAccountName: {{ include "hug.fullname" . }}
+      {{- if $hostNetwork }}
+      hostNetwork: true
+      dnsPolicy: ClusterFirstWithHostNet
+      {{- end }}
+      {{- with .Values.dnsConfig }}
+      dnsConfig:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      securityContext:
+        {{- if $hostNetwork }}
+        runAsUser: 0
+        runAsGroup: 0
+        runAsNonRoot: false
+        {{- else }}
+        # The image's haproxy user; containerd sets ip_unprivileged_port_start=0
+        # in the pod's netns, so it can still bind 80/443.
+        runAsUser: 1000
+        runAsGroup: 1000
+        runAsNonRoot: true
+        {{- end }}
+        seccompProfile:
+          type: RuntimeDefault
+      # The config dir is rewritten at runtime; seed writable copies of the
+      # image's dirs so the root filesystem can stay read-only.
+      initContainers:
+        - name: seed
+          image: {{ $image }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command: [/bin/sh, -c, "cp -a /usr/local/hug/. /seed/hug/ && mkdir -p /seed/run/haproxy"]
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: {drop: [ALL]}
+          resources:
+            requests: {cpu: 10m, memory: 16Mi}
+            limits: {memory: 64Mi}
+          volumeMounts:
+            - {name: hug, mountPath: /seed/hug}
+            - {name: run, mountPath: /seed/run}
+      containers:
+        - name: hug
+          image: {{ $image }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          args:
+            - --hugconf-crd={{ .Release.Namespace }}/{{ include "hug.fullname" . }}
+            - --controller-name={{ .Values.controllerName }}
+            - --hug-service-label={{ include "hug.serviceLabelKey" . }}:{{ include "hug.serviceLabelValue" . }}
+            - --stats-port={{ .Values.ports.stats }}
+            - --controller-port={{ .Values.ports.metrics }}
+            - --metrics-auth={{ .Values.metricsAuth }}
+            {{- with .Values.namespaces }}
+            - --namespaces={{ join "," . }}
+            {{- end }}
+            {{- range .Values.extraArgs }}
+            - {{ . }}
+            {{- end }}
+          env:
+            - name: POD_NAME
+              valueFrom: {fieldRef: {fieldPath: metadata.name}}
+            - name: POD_NAMESPACE
+              valueFrom: {fieldRef: {fieldPath: metadata.namespace}}
+            - name: POD_IP
+              valueFrom: {fieldRef: {fieldPath: status.podIP}}
+          ports:
+            - {name: stat, containerPort: {{ .Values.ports.stats }}, protocol: TCP}
+            - {name: metrics, containerPort: {{ .Values.ports.metrics }}, protocol: TCP}
+          readinessProbe:
+            tcpSocket:
+              port: stat
+            periodSeconds: 10
+          securityContext:
+            {{- toYaml $containerSecurity | nindent 12 }}
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+          volumeMounts:
+            - {name: hug, mountPath: /usr/local/hug}
+            - {name: run, mountPath: /run}
+            - {name: state, mountPath: /var/state}
+            - {name: tmp, mountPath: /tmp}
+      volumes:
+        - {name: hug, emptyDir: {}}
+        - {name: run, emptyDir: {medium: Memory, sizeLimit: 16Mi}}
+        - {name: state, emptyDir: {}}
+        - {name: tmp, emptyDir: {}}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}

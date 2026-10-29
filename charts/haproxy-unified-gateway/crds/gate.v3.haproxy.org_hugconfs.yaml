@@ -1,0 +1,145 @@
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    conf.hug/version: v0.7.0
+  name: hugconfs.gate.v3.haproxy.org
+spec:
+  group: gate.v3.haproxy.org
+  names:
+    kind: HugConf
+    listKind: HugConfList
+    plural: hugconfs
+    singular: hugconf
+  scope: Namespaced
+  versions:
+    - name: v3
+      schema:
+        openAPIV3Schema:
+          description: HugConf is a specification for a the controller related configuration
+          properties:
+            apiVersion:
+              description: |-
+                APIVersion defines the versioned schema of this representation of an object.
+                Servers should convert recognized schemas to the latest internal value, and
+                may reject unrecognized values.
+                More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+              type: string
+            kind:
+              description: |-
+                Kind is a string value representing the REST resource this object represents.
+                Servers may infer this from the endpoint the client submits requests to.
+                Cannot be updated.
+                In CamelCase.
+                More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+              type: string
+            metadata:
+              type: object
+            spec:
+              properties:
+                defaultsRef:
+                  properties:
+                    group:
+                      description: Group is the group of the referent.
+                      maxLength: 253
+                      pattern: ^$|^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$
+                      type: string
+                    kind:
+                      description: Kind is the kind of the referent.
+                      maxLength: 63
+                      minLength: 1
+                      pattern: ^[a-zA-Z]([-a-zA-Z0-9]*[a-zA-Z0-9])?$
+                      type: string
+                    name:
+                      description: Name is the name of the referent.
+                      maxLength: 253
+                      minLength: 1
+                      type: string
+                    namespace:
+                      description: Namespace is the namespace of the referent.
+                      maxLength: 63
+                      minLength: 1
+                      pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
+                      type: string
+                  required:
+                    - name
+                  type: object
+                globalRef:
+                  properties:
+                    group:
+                      description: Group is the group of the referent.
+                      maxLength: 253
+                      pattern: ^$|^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$
+                      type: string
+                    kind:
+                      description: Kind is the kind of the referent.
+                      maxLength: 63
+                      minLength: 1
+                      pattern: ^[a-zA-Z]([-a-zA-Z0-9]*[a-zA-Z0-9])?$
+                      type: string
+                    name:
+                      description: Name is the name of the referent.
+                      maxLength: 253
+                      minLength: 1
+                      type: string
+                    namespace:
+                      description: Namespace is the namespace of the referent.
+                      maxLength: 63
+                      minLength: 1
+                      pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
+                      type: string
+                  required:
+                    - name
+                  type: object
+                logging:
+                  properties:
+                    categoryLevelList:
+                      description: |-
+                        CategoryLevelList is a list of categories and their levels
+                        if a category is not present, the default level is used
+                      items:
+                        properties:
+                          category:
+                            enum:
+                              - k8s
+                              - gate
+                              - status
+                              - haproxycfg
+                              - app
+                              - batch
+                              - reloadmgr
+                              - certs-storage
+                              - maps-storage
+                              - hugservice
+                            type: string
+                          level:
+                            enum:
+                              - Debug
+                              - Info
+                              - Warn
+                              - Error
+                              - None
+                            type: string
+                        required:
+                          - category
+                          - level
+                        type: object
+                      type: array
+                    defaultLevel:
+                      enum:
+                        - Debug
+                        - Info
+                        - Warn
+                        - Error
+                        - None
+                      type: string
+                  type: object
+              required:
+                - logging
+              type: object
+          required:
+            - spec
+          type: object
+      served: true
+      storage: true

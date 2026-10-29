@@ -1,0 +1,100 @@
+# Empty tag falls back to the chart's appVersion.
+image:
+  repository: docker.io/haproxytech/haproxy-unified-gateway
+  tag: ""
+  pullPolicy: IfNotPresent
+
+# Deployment | DaemonSet
+kind: Deployment
+# Deployment only.
+replicas: 1
+# DaemonSet only: listeners bind on the node, so a Gateway listener on 80/443
+# means host 80/443. Runs HAProxy as root with only NET_BIND_SERVICE, because
+# the host keeps ip_unprivileged_port_start at 1024 and HAProxy has no file caps.
+hostNetwork: false
+dnsConfig: {}
+nodeSelector: {}
+affinity: {}
+tolerations: []
+
+# GatewayClasses with this controllerName are handled; others are ignored.
+controllerName: gate.haproxy.org/hug
+
+gatewayClasses: []
+#  - name: public-v2
+#    parametersRef: {group: gate.v3.haproxy.org, kind: HugGate, name: ..., namespace: ...}
+
+# Pod ports; with hostNetwork they are host ports too, so keep them in the host
+# firewall's guarded list.
+ports:
+  # HAProxy stats page and Prometheus exporter (/metrics).
+  stats: 1024
+  # Controller hug_* metrics.
+  metrics: 31060
+
+# none: plain HTTP. kube-rbac: HTTPS with TokenReview/SubjectAccessReview,
+# which adds two create rules to the ClusterRole.
+metricsAuth: none
+
+# Limits which namespaces' routes, Services and Secrets are used. The caches
+# stay cluster-wide, so RBAC is cluster-wide either way.
+namespaces: []
+
+extraArgs: []
+
+logging:
+  defaultLevel: Info
+  categoryLevelList:
+    - {category: k8s, level: Error}
+    - {category: batch, level: Error}
+
+haproxy:
+  global:
+    maxconn: 32000
+    sslMinVersion: TLSv1.2
+    # Merged into the Global CR spec (HAProxy global fields, snake_case).
+    extra: {}
+  defaults:
+    # Milliseconds.
+    timeouts:
+      client: 330000
+      server: 330000
+      httpRequest: 30000
+      httpKeepAlive: 60000
+      queue: 30000
+      connect: 5000
+    httpReuse: always
+    # Per backend server; past it requests wait in the queue for timeouts.queue.
+    serverMaxconn: 2048
+    # JSON lines; %HPO is the path without the query string.
+    logFormat: >-
+      '%{+json}o %(time)t %(client_ip)ci %(client_port)cp %(frontend)ft %(backend)b %(server)s
+      %(tq_ms)Tq %(tr_ms)TR %(tw_ms)Tw %(tc_ms)Tc %(trs_ms)Tr %(ta_ms)Ta %(status)ST
+      %(bytes_in)U %(bytes_out)B %(term)tsc
+      %(actconn)ac %(feconn)fc %(beconn)bc %(srvconn)sc %(retries)rc %(method)HM
+      %(host)[var(txn.host)] %(path)HPO %(proto)HV'
+    # Merged into the Defaults CR spec. No http-request rules here: frontends and
+    # backends share this section and HAProxy rejects rules in it.
+    extra:
+      # Replaces HUG's `log global` instead of appending a second target. The
+      # default 1024-byte line cuts long-path entries mid-JSON.
+      merge_strategy: override
+      log_target_list:
+        - {address: stdout, format: raw, facility: daemon, length: 8192}
+      # Connection-level failures (TLS handshakes) that never become a request.
+      error_log_format: >-
+        '%{+json}o %(time)t %(client_ip)ci %(client_port)cp %(frontend)ft
+        %(error)[fc_err_str] %(ssl_error)[ssl_fc_err_str]'
+
+metrics:
+  enabled: true
+  interval: 30s
+
+# No CPU limit: throttling the edge turns overload into a reconnect storm.
+# gopherd gives HAProxy 66% of the memory limit (-m) and the controller 33%.
+resources:
+  requests:
+    cpu: 100m
+    memory: 512Mi
+  limits:
+    memory: 2Gi

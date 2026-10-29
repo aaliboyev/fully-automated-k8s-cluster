@@ -1,0 +1,156 @@
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{ include "buildkit.fullname" . }}
+  labels:
+    {{- include "buildkit.labels" . | nindent 4 }}
+spec:
+  serviceName: {{ include "buildkit.fullname" . }}
+  replicas: {{ .Values.replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "buildkit.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      {{- with .Values.podAnnotations }}
+      annotations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      labels:
+        {{- include "buildkit.selectorLabels" . | nindent 8 }}
+    spec:
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      serviceAccountName: {{ include "buildkit.serviceAccountName" . }}
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      containers:
+        - name: buildkit
+          securityContext:
+            {{- toYaml .Values.securityContext | nindent 12 }}
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          args:
+            - --addr
+            - unix:///run/buildkit/buildkitd.sock
+            - --addr
+            - tcp://0.0.0.0:1234
+            {{- if or .Values.buildkitConfig .Values.registry.enabled }}
+            - --config
+            - /etc/buildkit/buildkitd.toml
+            {{- end }}
+            {{- if .Values.config.debug }}
+            - --debug
+            {{- end }}
+            {{- range .Values.config.extraArgs }}
+            - {{ . }}
+            {{- end }}
+          ports:
+            - name: buildkit
+              containerPort: 1234
+              protocol: TCP
+          env:
+            - name: BUILDKIT_STEP_LOG_MAX_SIZE
+              value: {{ .Values.config.stepLogMaxSize | quote }}
+            - name: BUILDKIT_STEP_LOG_MAX_SPEED
+              value: {{ .Values.config.stepLogMaxSpeed | quote }}
+          livenessProbe:
+            exec:
+              command:
+                - buildctl
+                - debug
+                - workers
+            initialDelaySeconds: 30
+            periodSeconds: 30
+            timeoutSeconds: 10
+          readinessProbe:
+            exec:
+              command:
+                - buildctl
+                - debug
+                - workers
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            timeoutSeconds: 5
+          volumeMounts:
+            - name: buildkit-data
+              mountPath: /var/lib/buildkit
+            {{- if or .Values.buildkitConfig .Values.registry.enabled }}
+            - name: config
+              mountPath: /etc/buildkit
+              readOnly: true
+            {{- end }}
+            {{- if and .Values.registry.enabled .Values.registry.auth.existingSecret }}
+            - name: registry-auth
+              mountPath: /root/.docker
+              readOnly: true
+            {{- else if and .Values.registry.enabled .Values.registry.auth.username .Values.registry.auth.password }}
+            - name: registry-auth
+              mountPath: /root/.docker
+              readOnly: true
+            {{- end }}
+            {{- if and .Values.registry.enabled .Values.registry.ca }}
+            - name: registry-ca
+              mountPath: /etc/buildkit/certs
+              readOnly: true
+            {{- end }}
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      volumes:
+        {{- if or .Values.buildkitConfig .Values.registry.enabled }}
+        - name: config
+          configMap:
+            name: {{ include "buildkit.fullname" . }}-config
+        {{- end }}
+        {{- if and .Values.registry.enabled .Values.registry.auth.existingSecret }}
+        - name: registry-auth
+          secret:
+            secretName: {{ .Values.registry.auth.existingSecret }}
+            items:
+              - key: .dockerconfigjson
+                path: config.json
+        {{- else if and .Values.registry.enabled .Values.registry.auth.username .Values.registry.auth.password }}
+        - name: registry-auth
+          secret:
+            secretName: {{ include "buildkit.fullname" . }}-registry
+            items:
+              - key: .dockerconfigjson
+                path: config.json
+        {{- end }}
+        {{- if and .Values.registry.enabled .Values.registry.ca }}
+        - name: registry-ca
+          secret:
+            secretName: {{ include "buildkit.fullname" . }}-registry-ca
+        {{- end }}
+  {{- if .Values.persistence.enabled }}
+  volumeClaimTemplates:
+    - metadata:
+        name: buildkit-data
+      spec:
+        accessModes:
+          - {{ .Values.persistence.accessMode }}
+        {{- if .Values.persistence.storageClass }}
+        storageClassName: {{ .Values.persistence.storageClass }}
+        {{- end }}
+        resources:
+          requests:
+            storage: {{ .Values.persistence.size }}
+  {{- else }}
+      volumes:
+        - name: buildkit-data
+          emptyDir: {}
+  {{- end }}

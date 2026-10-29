@@ -1,0 +1,22 @@
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: flow-history
+  namespace: argocd
+spec:
+  project: default
+  source:
+    repoURL: git@github.com:your-org/your-infra-repo.git
+    targetRevision: main
+    path: components/flow-history
+    helm:
+      releaseName: flow-history
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: flow-history
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true

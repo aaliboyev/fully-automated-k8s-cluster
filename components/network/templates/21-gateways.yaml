@@ -41,16 +41,18 @@ metadata:
   annotations:
     argocd.argoproj.io/sync-wave: "2"
     cert-manager.io/cluster-issuer: letsencrypt-dns
+    external-dns.alpha.kubernetes.io/target: {{ .Values.publicEdgeHostname }}
 spec:
-  gatewayClassName: public          # must match Traefik's GatewayClass
+  gatewayClassName: public-v2
   listeners:
+    # Every host on port 80, routed only to https-redirect below: app routes
+    # from other namespaces can't attach, so nothing is served over plain HTTP.
     - name: web
       protocol: HTTP
       port: 80
-      hostname: {{ .Values.gatewayHostname | quote }}    # HTTP, no TLS, but host still useful for routing
       allowedRoutes:
         namespaces:
-          from: All
+          from: Same
 
     - name: websecure
       protocol: HTTPS
@@ -65,3 +67,17 @@ spec:
           - group: ''
             name: public-wildcard-tls  # Secret name *and* Certificate name
             kind: Secret               # must be Secret, same namespace as Gateway
+
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: https-redirect
+  namespace: network
+spec:
+  parentRefs:
+    - {name: public, sectionName: web}
+  rules:
+    - filters:
+        - type: RequestRedirect
+          requestRedirect: {scheme: https, statusCode: 301}

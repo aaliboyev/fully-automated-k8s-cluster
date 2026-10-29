@@ -1,0 +1,32 @@
+# The private Traefik serves Prometheus metrics on the port named `metrics`.
+apiVersion: operator.victoriametrics.com/v1beta1
+kind: VMPodScrape
+metadata:
+  name: traefik
+  namespace: network
+  annotations:
+    argocd.argoproj.io/sync-options: SkipDryRunOnMissingResource=true
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: traefik
+  podMetricsEndpoints:
+    - port: metrics
+      path: /metrics
+      interval: 30s
+      relabelConfigs:
+        - action: replace
+          source_labels: [__meta_kubernetes_pod_label_app_kubernetes_io_instance]
+          regex: network-traefik-(.+)-network
+          target_label: gateway
+        - action: replace
+          source_labels: [__meta_kubernetes_pod_node_name]
+          target_label: node
+      # Gateway API service names embed hashes and backend details;
+      # `route` keeps just <namespace>-<route> (or the name before @provider).
+      metricRelabelConfigs:
+        - action: replace
+          source_labels: [service]
+          regex: (?:httproute-(.+?)-gw-.+|(.+))@.+
+          replacement: $1$2
+          target_label: route

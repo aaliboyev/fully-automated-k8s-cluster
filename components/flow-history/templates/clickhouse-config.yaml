@@ -1,0 +1,129 @@
+{{- $ch := .Values.clickhouse }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: clickhouse-config
+  namespace: {{ .Release.Namespace }}
+data:
+  # Console only: the root filesystem is read-only and kubelet keeps the logs.
+  server.xml: |
+    <clickhouse>
+      <logger>
+        <level>information</level>
+        <console>1</console>
+        <log remove="1"/>
+        <errorlog remove="1"/>
+      </logger>
+    </clickhouse>
+  system-logs.xml: |
+    <clickhouse>
+      <text_log remove="1"/>
+      <trace_log remove="1"/>
+      <metric_log remove="1"/>
+      <asynchronous_metric_log remove="1"/>
+      <query_metric_log remove="1"/>
+      <blob_storage_log remove="1"/>
+      <query_log><ttl>event_date + INTERVAL 7 DAY DELETE</ttl></query_log>
+      <part_log><ttl>event_date + INTERVAL 7 DAY DELETE</ttl></part_log>
+      <error_log><ttl>event_date + INTERVAL 7 DAY DELETE</ttl></error_log>
+      <processors_profile_log><ttl>event_date + INTERVAL 7 DAY DELETE</ttl></processors_profile_log>
+      <asynchronous_insert_log><ttl>event_date + INTERVAL 7 DAY DELETE</ttl></asynchronous_insert_log>
+    </clickhouse>
+  # Parts reach the s3 volume only through the table's TTL (move_factor 0), and
+  # aren't merged there: a merge would read and rewrite them over the network.
+  storage.xml: |
+    <clickhouse>
+      <storage_configuration>
+        <disks>
+          <s3>
+            <type>s3</type>
+            <endpoint>https://{{ $ch.s3.bucket }}.s3.{{ $ch.s3.region }}.amazonaws.com/clickhouse/</endpoint>
+            <region>{{ $ch.s3.region }}</region>
+            <access_key_id from_env="AWS_ACCESS_KEY_ID"/>
+            <secret_access_key from_env="AWS_SECRET_ACCESS_KEY"/>
+            <metadata_path>/var/lib/clickhouse/disks/s3/</metadata_path>
+          </s3>
+        </disks>
+        <policies>
+          <tiered>
+            <volumes>
+              <hot><disk>default</disk></hot>
+              <s3>
+                <disk>s3</disk>
+                <prefer_not_to_merge>true</prefer_not_to_merge>
+              </s3>
+            </volumes>
+            <move_factor>0</move_factor>
+          </tiered>
+        </policies>
+      </storage_configuration>
+    </clickhouse>
+  # default is the local admin (kubectl exec); vector writes, grafana reads.
+  users.xml: |
+    <clickhouse>
+      <profiles>
+        <grafana>
+          <readonly>2</readonly>
+          <max_execution_time>120</max_execution_time>
+          <max_memory_usage>2000000000</max_memory_usage>
+        </grafana>
+      </profiles>
+      <users>
+        <default>
+          <networks replace="replace">
+            <ip>::1</ip>
+            <ip>127.0.0.1</ip>
+          </networks>
+          <access_management>1</access_management>
+        </default>
+        <vector>
+          <password from_env="CLICKHOUSE_VECTOR_PASSWORD"/>
+          <networks><ip>::/0</ip></networks>
+          <profile>default</profile>
+          <quota>default</quota>
+          <grants><query>GRANT INSERT ON hubble.flows</query></grants>
+        </vector>
+        <grafana>
+          <password from_env="CLICKHOUSE_GRAFANA_PASSWORD"/>
+          <networks><ip>::/0</ip></networks>
+          <profile>grafana</profile>
+          <quota>default</quota>
+          <grants><query>GRANT SELECT ON hubble.*</query></grants>
+        </grafana>
+      </users>
+    </clickhouse>
+  # Runs on every start (CLICKHOUSE_ALWAYS_RUN_INITDB_SCRIPTS); changes to an
+  # existing table need an ALTER by hand.
+  flows.sql: |
+    CREATE DATABASE IF NOT EXISTS hubble;
+    CREATE TABLE IF NOT EXISTS hubble.flows
+    (
+        time DateTime64(9, 'UTC') CODEC(Delta, ZSTD(1)),
+        node LowCardinality(String),
+        verdict LowCardinality(String),
+        drop_reason LowCardinality(String),
+        direction LowCardinality(String),
+        is_reply Nullable(Bool),
+        src_ip String CODEC(ZSTD(1)),
+        dst_ip String CODEC(ZSTD(1)),
+        protocol LowCardinality(String),
+        src_port UInt16 CODEC(ZSTD(1)),
+        dst_port UInt16 CODEC(ZSTD(1)),
+        tcp_flags LowCardinality(String),
+        icmp_type UInt8,
+        src_namespace LowCardinality(String),
+        src_pod LowCardinality(String),
+        src_workload LowCardinality(String),
+        dst_namespace LowCardinality(String),
+        dst_pod LowCardinality(String),
+        dst_workload LowCardinality(String),
+        dst_service LowCardinality(String),
+        dst_service_namespace LowCardinality(String)
+    )
+    ENGINE = MergeTree
+    PARTITION BY toDate(time)
+    -- Node first: each node's flows are time-ordered, which keeps Delta small.
+    ORDER BY (node, time)
+    TTL toDateTime(time) + INTERVAL {{ $ch.hotDays }} DAY TO DISK 's3',
+        toDateTime(time) + INTERVAL {{ $ch.retentionDays }} DAY DELETE
+    SETTINGS storage_policy = 'tiered', ttl_only_drop_parts = 1;

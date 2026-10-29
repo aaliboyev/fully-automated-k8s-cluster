@@ -9,6 +9,6 @@ grafana:
   domain: grafana.example.com
 
 # Git repository URL for ArgoCD applications
-repoURL: git@github.com:yourusername/your-repo.git
+repoURL: git@github.com:your-org/your-infra-repo.git
 
 # Child application Helm values are in the values/ directory

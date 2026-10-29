@@ -1,0 +1,6 @@
+# Fallback: VXLAN between nodes, WireGuard for pod traffic only; host
+# traffic stays plain. Applied on top of values.yaml.
+routingMode: tunnel
+tunnelProtocol: vxlan
+encryption:
+  nodeEncryption: false

@@ -1,0 +1,25 @@
+{{- if .Values.metrics.enabled }}
+apiVersion: operator.victoriametrics.com/v1beta1
+kind: VMPodScrape
+metadata:
+  name: {{ include "hug.fullname" . }}
+  labels:
+    {{- include "hug.labels" . | nindent 4 }}
+spec:
+  selector:
+    matchLabels:
+      {{- include "hug.selectorLabels" . | nindent 6 }}
+  podMetricsEndpoints:
+    - port: stat
+      path: /metrics
+      interval: {{ .Values.metrics.interval }}
+    - port: metrics
+      path: /metrics
+      interval: {{ .Values.metrics.interval }}
+      {{- if eq .Values.metricsAuth "kube-rbac" }}
+      scheme: https
+      tlsConfig:
+        insecureSkipVerify: true
+      bearerTokenFile: /var/run/secrets/kubernetes.io/serviceaccount/token
+      {{- end }}
+{{- end }}

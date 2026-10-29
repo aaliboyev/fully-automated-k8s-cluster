@@ -1,0 +1,23 @@
+# Tailscale Kubernetes operator — the mesh's cluster plane (see TAILSCALE.md)
+#
+# OAuth credentials are NOT in git: the operator mounts the pre-created
+# `operator-oauth` secret (bootstrap step, like other credential secrets):
+#   kubectl create secret generic operator-oauth -n tailscale \
+#     --from-literal=client_id=... --from-literal=client_secret=...
+oauthSecretVolume:
+  secret:
+    secretName: operator-oauth
+
+operatorConfig:
+  hostname: k8s-operator
+  defaultTags:
+    - tag:k8s-operator
+
+# API-server proxy: kubectl over the tailnet with tailnet identity.
+# Requires the kubernetes impersonation grant in the tailnet policy.
+apiServerProxyConfig:
+  mode: "true"
+
+# ProxyClass in templates/13-tailscale-proxyclass.yaml.
+proxyConfig:
+  defaultProxyClass: datacenter

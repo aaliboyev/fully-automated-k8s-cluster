@@ -1,0 +1,29 @@
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: network-haproxy-public
+  namespace: argocd
+  annotations:
+    argocd.argoproj.io/sync-wave: "1"
+spec:
+  project: default
+  sources:
+    - repoURL: {{ .Values.repoURL }}
+      targetRevision: main
+      path: charts/haproxy-unified-gateway
+      helm:
+        releaseName: haproxy-public
+        valueFiles:
+          - $values/components/network/values/haproxy-public.yaml
+    - repoURL: {{ .Values.repoURL }}
+      targetRevision: main
+      ref: values
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: network
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - ServerSideApply=true

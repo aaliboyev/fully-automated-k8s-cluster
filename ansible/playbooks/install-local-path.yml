@@ -1,0 +1,112 @@
+---
+# =============================================================================
+# Install local-path-provisioner on Kubernetes cluster (pinned to node5)
+# =============================================================================
+- name: Install local-path-provisioner
+  hosts: control_plane[0]
+  become: yes
+  gather_facts: no
+
+  tasks:
+    # -------------------------------------------------------------------------
+    # Install Helm
+    # -------------------------------------------------------------------------
+    - name: Check if Helm is installed
+      command: which helm
+      register: helm_check
+      failed_when: false
+      changed_when: false
+
+    - name: Install Helm
+      shell: curl https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash
+      when: helm_check.rc != 0
+
+    # -------------------------------------------------------------------------
+    # Ensure host path exists on node5
+    # -------------------------------------------------------------------------
+    - name: Ensure /opt/local-path-data exists on node5
+      file:
+        path: /opt/local-path-data
+        state: directory
+        mode: '0755'
+      delegate_to: node5
+      become: yes
+
+    # -------------------------------------------------------------------------
+    # Clone rancher/local-path-provisioner chart from GitHub master
+    # -------------------------------------------------------------------------
+    - name: Remove previous chart clone if present
+      file:
+        path: /tmp/local-path-provisioner-chart
+        state: absent
+
+    - name: Clone local-path-provisioner chart from GitHub
+      ansible.builtin.git:
+        repo: https://github.com/rancher/local-path-provisioner.git
+        dest: /tmp/local-path-provisioner-chart
+        version: "{{ local_path_version }}"
+        depth: 1
+
+    - name: Check if local-path-storage namespace exists
+      command: kubectl get namespace local-path-storage
+      register: ns_check
+      failed_when: false
+      changed_when: false
+
+    - name: Create local-path-storage namespace
+      command: kubectl create namespace local-path-storage
+      when: ns_check.rc != 0
+
+    - name: Copy local-path values file
+      copy:
+        src: "{{ playbook_dir }}/../../components/local-path/values.yaml"
+        dest: /tmp/local-path-values.yaml
+        mode: '0644'
+
+    - name: Install local-path-provisioner via Helm
+      command: >
+        helm upgrade --install local-path-provisioner
+        /tmp/local-path-provisioner-chart/deploy/chart/local-path-provisioner
+        --namespace local-path-storage
+        --values /tmp/local-path-values.yaml
+
+    - name: Clean up chart clone
+      file:
+        path: /tmp/local-path-provisioner-chart
+        state: absent
+
+    - name: Wait for local-path-provisioner to be ready
+      command: kubectl -n local-path-storage rollout status deployment/local-path-provisioner --timeout=5m
+      changed_when: false
+
+    # -------------------------------------------------------------------------
+    # Apply StorageClass
+    # -------------------------------------------------------------------------
+    - name: Copy local-fast StorageClass manifest
+      copy:
+        src: "{{ playbook_dir }}/../../components/local-path/storage-class.yaml"
+        dest: /tmp/local-fast-storage-class.yaml
+        mode: '0644'
+
+    - name: Apply local-fast StorageClass
+      command: kubectl apply -f /tmp/local-fast-storage-class.yaml
+
+    - name: Display storage classes
+      command: kubectl get sc
+      register: storage_classes
+      changed_when: false
+
+    - name: Show storage classes
+      debug:
+        var: storage_classes.stdout_lines
+
+    - name: Display access info
+      debug:
+        msg: |
+          local-path-provisioner installed successfully!
+
+          StorageClass 'local-fast' is now available.
+          Storage is pinned to node node5 at /opt/local-path-data.
+
+          Use storageClassName: local-fast in PVCs for fast local storage.
+          WARNING: Data is NOT replicated — only use for rebuildable data.

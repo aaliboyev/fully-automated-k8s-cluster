@@ -1,0 +1,114 @@
+# Cilium on the kubeadm cluster: eBPF kube-proxy replacement, native routing
+# with WireGuard between nodes, pod IPs from each node's podCIDR. Installed by
+# playbooks/install-cilium.yml; VXLAN fallback in values-tunnel.yaml.
+k8sServiceHost: k8s.example.com
+k8sServicePort: 6443
+kubeProxyReplacement: true
+# Restart agents and operator when their config changes (the chart default doesn't).
+rollOutCiliumPods: true
+
+ipam:
+  mode: kubernetes
+routingMode: native
+autoDirectNodeRoutes: false
+ipv4NativeRoutingCIDR: 192.168.0.0/16
+enableIPv4Masquerade: true
+bpf:
+  masquerade: true
+  lbExternalClusterIP: true
+
+# The nodes sit in three /22s with no shared L2, so nothing else routes pod
+# CIDRs between them: node traffic goes through WireGuard too (host to remote
+# pod, DRBD, etcd). A node whose agent can't start is cut off from the others
+# until its CiliumNode is deleted.
+encryption:
+  enabled: true
+  type: wireguard
+  nodeEncryption: true
+
+# tailscale0 only so ClusterIPs reached over the tailnet (node3 advertises the
+# private gateway's 10.111.111.111) get service translation; pod traffic and
+# node addressing stay on eth0, which carries direct routing.
+devices: [eth0, tailscale0]
+nodePort:
+  directRoutingDevice: eth0
+
+# Also covers UDP from the host network to service IPs (Calico's was TCP-only).
+# Host namespace only: pods get per-packet service translation, which proxies
+# that forward without their own socket (Tailscale operator proxies) need.
+socketLB:
+  enabled: true
+  hostNamespaceOnly: true
+
+# Lets ipBlock rules match node addresses (host-network edge, API server).
+policyCIDRMatchMode: [nodes]
+
+# Envoy runs inside the agent and only starts when an L7 or FQDN policy needs it.
+envoy:
+  enabled: false
+gatewayAPI:
+  enabled: false
+ingressController:
+  enabled: false
+
+# The agent's default opts control-plane nodes out of node encryption; an
+# empty value would opt every node out, so it names a label no node carries.
+extraConfig:
+  node-encryption-opt-out-labels: example.com/wireguard-opt-out
+
+prometheus:
+  enabled: true
+operator:
+  rollOutPods: true
+  prometheus:
+    enabled: true
+  # Chart defaults plus network-unavailable: after a CNI swap that taint stays
+  # until an agent starts, and the agents wait for the CRDs the operator registers.
+  tolerations:
+    - {key: node-role.kubernetes.io/control-plane, operator: Exists}
+    - {key: node-role.kubernetes.io/master, operator: Exists}
+    - {key: node.kubernetes.io/not-ready, operator: Exists}
+    - {key: node.kubernetes.io/network-unavailable, operator: Exists}
+    - {key: node.cloudprovider.kubernetes.io/uninitialized, operator: Exists}
+    - {key: node.cilium.io/agent-not-ready, operator: Exists}
+
+hubble:
+  enabled: true
+  relay:
+    enabled: true
+  ui:
+    enabled: true
+  metrics:
+    enabled:
+      - dns:query;ignoreAAAA
+      - drop
+      - tcp
+      - flow
+      - icmp
+  # Flow history: rotated JSON per node, shipped to ClickHouse by Vector.
+  export:
+    static:
+      enabled: true
+      filePath: /var/run/cilium/hubble/events.log
+      fileMaxSizeMb: 50
+      fileMaxBackups: 5
+      fieldMask:
+        - time
+        - node_name
+        - verdict
+        - drop_reason_desc
+        - traffic_direction
+        - is_reply
+        - IP.source
+        - IP.destination
+        - l4
+        - source.namespace
+        - source.pod_name
+        - source.workloads
+        - destination.namespace
+        - destination.pod_name
+        - destination.workloads
+        - destination_service
+      denyList:
+        - '{"source_label":["reserved:health"]}'
+        - '{"destination_label":["reserved:health"]}'

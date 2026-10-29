@@ -1,0 +1,156 @@
+---
+# =============================================================================
+# Closes cluster-internal host ports (API server, etcd, kubelet, Cilium, metrics,
+# rpcbind) to everything except nodes, pods, loopback and Tailscale.
+# Usage: ansible-playbook -i inventory.ini playbooks/configure-firewall.yml --limit node1
+#
+# A table of its own, loaded by its own unit: Cilium and Tailscale manage
+# their own nftables tables, and Debian's nftables.service starts with
+# `flush ruleset`, so it stays disabled.
+# =============================================================================
+# Every node's address goes into the trusted set, also under --limit.
+- name: Gather node addresses
+  hosts: k8s
+  gather_facts: no
+  tasks:
+    - name: Gather network facts of all nodes
+      setup:
+        gather_subset: [network]
+      delegate_to: "{{ item }}"
+      delegate_facts: true
+      loop: "{{ groups['k8s'] }}"
+      run_once: true
+
+- name: Configure host firewall
+  hosts: k8s
+  become: yes
+  gather_facts: no
+  serial: 1
+
+  vars:
+    revert_after_seconds: 300
+
+  tasks:
+    - name: Write /etc/node-firewall.nft
+      copy:
+        dest: /etc/node-firewall.nft
+        mode: '0644'
+        content: |
+          #!/usr/sbin/nft -f
+          # Declare-then-delete makes a reload replace the table atomically.
+          table inet node_firewall
+          delete table inet node_firewall
+
+          table inet node_firewall {
+            set trusted_v4 {
+              type ipv4_addr
+              flags interval
+              elements = { {{ groups['k8s'] | map('extract', hostvars, ['ansible_facts', 'default_ipv4', 'address']) | join(', ') }}, {{ pod_network_cidr }} }
+            }
+
+            chain input {
+              type filter hook input priority filter - 10; policy accept;
+              iifname { "lo", "tailscale0" } accept
+              ip saddr @trusted_v4 accept
+              tcp dport { {{ firewall_guarded_tcp_ports | join(', ') }} } drop
+              udp dport { {{ firewall_guarded_udp_ports | join(', ') }} } drop
+            }
+          }
+      register: rules
+
+    - name: Write node-firewall.service
+      copy:
+        dest: /etc/systemd/system/node-firewall.service
+        mode: '0644'
+        content: |
+          [Unit]
+          Description=Host firewall for cluster-internal ports
+          Before=kubelet.service
+          After=network-pre.target
+
+          [Service]
+          Type=oneshot
+          RemainAfterExit=yes
+          ExecStart=/usr/sbin/nft -f /etc/node-firewall.nft
+          ExecReload=/usr/sbin/nft -f /etc/node-firewall.nft
+          ExecStop=/usr/sbin/nft delete table inet node_firewall
+
+          [Install]
+          WantedBy=multi-user.target
+
+    - name: Check whether the table is loaded
+      command: nft list table inet node_firewall
+      register: loaded
+      failed_when: false
+      changed_when: false
+
+    - name: Apply rules with automatic revert
+      when: rules.changed or loaded.rc != 0
+      block:
+        - name: Clear a leftover revert timer
+          shell: systemctl stop node-firewall-revert.timer; systemctl reset-failed node-firewall-revert.timer node-firewall-revert.service
+          failed_when: false
+          changed_when: false
+
+        # Removes the table unless the checks below pass and cancel it.
+        - name: Arm revert timer
+          command: >-
+            systemd-run --collect --unit=node-firewall-revert --on-active={{ revert_after_seconds }}
+            /usr/sbin/nft delete table inet node_firewall
+
+        - name: Load rules
+          command: nft -f /etc/node-firewall.nft
+
+        - name: Let connections re-establish
+          pause:
+            seconds: 30
+
+        - name: Node is Ready
+          command: kubectl --kubeconfig /etc/kubernetes/admin.conf get node {{ inventory_hostname }} -o jsonpath='{.status.conditions[?(@.type=="Ready")].status}'
+          delegate_to: "{{ groups['control_plane'][0] }}"
+          register: node_ready
+          until: node_ready.stdout == "True"
+          retries: 6
+          delay: 10
+          changed_when: false
+
+        - name: Cilium agent on the node is ready
+          command: >-
+            kubectl --kubeconfig /etc/kubernetes/admin.conf -n kube-system get pods -l k8s-app=cilium
+            --field-selector spec.nodeName={{ inventory_hostname }}
+            -o jsonpath='{.items[0].status.containerStatuses[0].ready}'
+          delegate_to: "{{ groups['control_plane'][0] }}"
+          register: cilium_ready
+          until: cilium_ready.stdout == "true"
+          retries: 6
+          delay: 10
+          changed_when: false
+
+        - name: Node reaches the API server
+          command: curl -sk --max-time 5 https://{{ hostvars[groups['control_plane'][0]]['ansible_facts']['default_ipv4']['address'] }}:6443/readyz
+          register: api_ready
+          until: api_ready.stdout == "ok"
+          retries: 3
+          delay: 5
+          changed_when: false
+
+        - name: Health URLs answer
+          uri:
+            url: "{{ item }}"
+          loop: "{{ node_health_urls }}"
+          delegate_to: localhost
+          become: no
+          register: health
+          until: health.status == 200
+          retries: 3
+          delay: 5
+
+        - name: Cancel revert timer
+          command: systemctl stop node-firewall-revert.timer
+
+    - name: Enable node-firewall.service
+      systemd:
+        name: node-firewall
+        enabled: yes
+        state: started
+        daemon_reload: yes

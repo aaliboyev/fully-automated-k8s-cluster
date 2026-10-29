@@ -1,0 +1,46 @@
+# Logs can carry tokens, so the MCP endpoints sit behind basic auth even on
+# the private gateway. Secret observability/mcp-basic-auth (key `users`,
+# htpasswd lines) is managed out of band.
+apiVersion: traefik.io/v1alpha1
+kind: Middleware
+metadata:
+  name: mcp-basic-auth
+  namespace: observability
+  annotations:
+    argocd.argoproj.io/sync-wave: "3"
+spec:
+  basicAuth:
+    secret: mcp-basic-auth
+    removeHeader: true
+{{- range $name := list "mcp-victoriametrics" "mcp-victorialogs" }}
+{{- $host := printf "%s.%s" $name $.Values.domain }}
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: {{ $name }}
+  namespace: observability
+  annotations:
+    argocd.argoproj.io/sync-wave: "3"
+    external-dns.alpha.kubernetes.io/hostname: {{ $host }}
+spec:
+  hostnames:
+    - {{ $host }}
+  parentRefs:
+    - name: private
+      namespace: network
+  rules:
+    - matches:
+        - path:
+            type: PathPrefix
+            value: /
+      filters:
+        - type: ExtensionRef
+          extensionRef:
+            group: traefik.io
+            kind: Middleware
+            name: mcp-basic-auth
+      backendRefs:
+        - name: {{ $name }}
+          port: 8080
+{{- end }}

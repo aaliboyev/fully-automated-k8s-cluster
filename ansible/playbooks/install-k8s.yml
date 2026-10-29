@@ -11,78 +11,17 @@
 
   tasks:
     # -------------------------------------------------------------------------
-    # Install Longhorn prerequisites
+    # Storage prerequisites: the LINSTOR satellite builds DRBD against the
+    # running kernel's headers; the metapackage keeps them matched on upgrades.
     # -------------------------------------------------------------------------
-    - name: Install Longhorn required packages
+    - name: Install kernel headers and tools
       apt:
         name:
+          - linux-headers-amd64
           - util-linux
-          - coreutils
-          - gawk
-          - open-iscsi
-          - nfs-common
           - jq
-          - cryptsetup
-          - dmsetup
-          - multipath-tools
         state: present
         update_cache: yes
-
-    - name: Ensure required kernel modules are loaded
-      modprobe:
-        name: "{{ item }}"
-        state: present
-      loop:
-        - iscsi_tcp
-        - nfs
-        - dm_crypt
-
-    - name: Persist kernel modules across reboots
-      lineinfile:
-        path: /etc/modules
-        line: "{{ item }}"
-        create: yes
-      loop:
-        - iscsi_tcp
-        - nfs
-        - dm_crypt
-
-    - name: Enable and start iscsid service
-      systemd:
-        name: iscsid
-        enabled: yes
-        state: started
-
-    # -------------------------------------------------------------------------
-    # Install longhornctl for preflight checks
-    # -------------------------------------------------------------------------
-    - name: Check if longhornctl is installed
-      command: which longhornctl
-      register: longhornctl_check
-      failed_when: false
-      changed_when: false
-
-    - name: Determine architecture
-      command: uname -m
-      register: arch
-      changed_when: false
-      when: longhornctl_check.rc != 0
-
-    - name: Set architecture variable
-      set_fact:
-        longhorn_arch: "{{ 'arm64' if arch.stdout == 'aarch64' else 'amd64' }}"
-      when: longhornctl_check.rc != 0
-
-    - name: Download longhornctl
-      get_url:
-        url: "https://github.com/longhorn/cli/releases/download/{{ longhorn_cli_version }}/longhornctl-linux-{{ longhorn_arch }}"
-        dest: /tmp/longhornctl
-        mode: '0755'
-      when: longhornctl_check.rc != 0
-
-    - name: Install longhornctl
-      command: install /tmp/longhornctl /usr/local/bin/longhornctl
-      when: longhornctl_check.rc != 0
 
     # -------------------------------------------------------------------------
     # Install Kubernetes components

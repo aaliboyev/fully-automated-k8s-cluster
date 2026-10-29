@@ -1,0 +1,29 @@
+# local-path-provisioner Helm chart values
+# Upstream chart: https://github.com/rancher/local-path-provisioner/tree/master/deploy/chart/local-path-provisioner
+# Chart docs: https://github.com/rancher/local-path-provisioner/blob/master/README.md
+
+image:
+  repository: rancher/local-path-provisioner
+  tag: v0.0.37
+  pullPolicy: IfNotPresent
+
+# We manage the StorageClass ourselves in storage-class.yaml.
+# The provisionerName must match the `provisioner:` field there.
+storageClass:
+  create: false
+  provisionerName: rancher.io/local-path
+
+# Cluster-wide local-path: any node can host PVs at /opt/local-path-data.
+# Override per-node only when a node has unusual mount layout.
+nodePathMap:
+  - node: DEFAULT_PATH_FOR_NON_LISTED_NODES
+    paths:
+      - /opt/local-path-data
+
+resources:
+  requests:
+    cpu: 50m
+    memory: 64Mi
+  limits:
+    cpu: 100m
+    memory: 128Mi

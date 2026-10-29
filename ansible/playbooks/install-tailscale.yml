@@ -1,0 +1,79 @@
+---
+# =============================================================================
+# Install Tailscale on cluster nodes (node plane of the mesh)
+# Usage: ansible-playbook -i inventory.ini playbooks/install-tailscale.yml \
+#          -e tailscale_authkey=tskey-auth-XXXX
+#        ansible-playbook -i inventory.ini playbooks/install-tailscale.yml --limit node1
+#
+# The auth key must be a TAGGED (tag:node), REUSABLE pre-auth key minted from
+# the OAuth client. Never commit a key. Re-runs are no-ops on enrolled nodes,
+# so the key is only needed when enrolling.
+# Device name is forced to the inventory name (node2, node1, ...) so DNS
+# records under net.example.com map 1:1.
+# =============================================================================
+- name: Install Tailscale
+  hosts: k8s
+  become: yes
+  gather_facts: no
+
+  tasks:
+    # -------------------------------------------------------------------------
+    # Repo + package
+    # -------------------------------------------------------------------------
+    - name: Install Tailscale apt signing key
+      get_url:
+        url: https://pkgs.tailscale.com/stable/debian/trixie.noarmor.gpg
+        dest: /usr/share/keyrings/tailscale-archive-keyring.gpg
+        mode: "0644"
+
+    - name: Add Tailscale apt repository
+      apt_repository:
+        repo: "deb [signed-by=/usr/share/keyrings/tailscale-archive-keyring.gpg] https://pkgs.tailscale.com/stable/debian trixie main"
+        filename: tailscale
+        state: present
+
+    - name: Install tailscale
+      apt:
+        name: tailscale
+        state: present
+        update_cache: yes
+
+    - name: Enable and start tailscaled
+      systemd:
+        name: tailscaled
+        enabled: yes
+        state: started
+
+    # -------------------------------------------------------------------------
+    # Enroll (skipped when already connected)
+    # -------------------------------------------------------------------------
+    - name: Check tailscale backend state
+      command: tailscale status --json
+      register: ts_status
+      changed_when: false
+      failed_when: false
+
+    - name: Fail if enrolling without an auth key
+      fail:
+        msg: "{{ inventory_hostname }} is not enrolled; pass -e tailscale_authkey=tskey-auth-..."
+      when:
+        - (ts_status.stdout | from_json).BackendState | default('') != 'Running'
+        - tailscale_authkey is not defined
+
+    - name: Bring tailscale up
+      command: >
+        tailscale up
+        --auth-key={{ tailscale_authkey }}
+        --hostname={{ inventory_hostname }}
+        --advertise-tags=tag:node
+        --accept-dns=false
+      when: (ts_status.stdout | from_json).BackendState | default('') != 'Running'
+
+    - name: Report tailnet IP
+      command: tailscale ip -4
+      register: ts_ip
+      changed_when: false
+
+    - name: Show tailnet IP
+      debug:
+        msg: "{{ inventory_hostname }}: {{ ts_ip.stdout }}"

@@ -1,0 +1,127 @@
+---
+# =============================================================================
+# Install/upgrade containerd from Docker's apt repo (containerd.io, bundles runc)
+# Usage: ansible-playbook -i inventory.ini playbooks/upgrade-containerd.yml --limit node1
+#
+# One node at a time: drain, swap the package, restart, wait Ready, uncordon.
+# Replaces Debian's containerd/runc packages. The existing config.toml is kept
+# (force-confold): containerd.io's default config disables the CRI plugin.
+# =============================================================================
+- name: Upgrade containerd
+  hosts: k8s
+  become: yes
+  serial: 1
+  gather_facts: no
+
+  tasks:
+    - name: Current containerd version
+      command: containerd --version
+      register: containerd_before
+      changed_when: false
+
+    - name: Skip nodes already on the target version
+      meta: end_host
+      when: ("v" + containerd_version.split('-')[0]) in containerd_before.stdout
+
+    # -e skip_drain=true resumes a node whose drain already evicted the workloads
+    # (e.g. only a PDB-protected pod is left and blocks the timeout).
+    - name: Drain node
+      command: >
+        kubectl drain {{ inventory_hostname }}
+        --ignore-daemonsets --delete-emptydir-data --timeout=10m
+      delegate_to: localhost
+      become: no
+      when: not (skip_drain | default(false) | bool)
+
+    - name: Checksum config.toml before
+      stat:
+        path: /etc/containerd/config.toml
+      register: config_before
+
+    - name: Back up config.toml
+      copy:
+        src: /etc/containerd/config.toml
+        dest: /etc/containerd/config.toml.pre-upgrade
+        remote_src: yes
+        mode: "0644"
+
+    # -------------------------------------------------------------------------
+    # Repo + package
+    # -------------------------------------------------------------------------
+    - name: Install Docker apt signing key
+      get_url:
+        url: https://download.docker.com/linux/debian/gpg
+        dest: /etc/apt/keyrings/docker.asc
+        mode: "0644"
+
+    - name: Add Docker apt repository
+      apt_repository:
+        repo: "deb [arch=amd64 signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/debian trixie stable"
+        filename: docker
+        state: present
+
+    - name: Release hold on containerd.io
+      dpkg_selections:
+        name: containerd.io
+        selection: install
+      failed_when: false
+
+    - name: Install containerd.io
+      apt:
+        name: "containerd.io={{ containerd_version }}"
+        state: present
+        update_cache: yes
+        dpkg_options: force-confold,force-confdef
+
+    - name: Hold containerd.io
+      dpkg_selections:
+        name: containerd.io
+        selection: hold
+
+    - name: Checksum config.toml after
+      stat:
+        path: /etc/containerd/config.toml
+      register: config_after
+
+    - name: Fail if the package replaced config.toml
+      fail:
+        msg: "/etc/containerd/config.toml changed during install; restore it before restarting"
+      when: config_before.stat.checksum != config_after.stat.checksum
+
+    - name: Restart containerd and kubelet
+      systemd:
+        name: "{{ item }}"
+        state: restarted
+      loop:
+        - containerd
+        - kubelet
+
+    - name: CRI plugin answers
+      command: crictl --runtime-endpoint unix:///run/containerd/containerd.sock info
+      register: crictl_info
+      retries: 12
+      delay: 5
+      until: crictl_info.rc == 0
+      changed_when: false
+
+    - name: Wait for node Ready
+      command: >
+        kubectl wait node/{{ inventory_hostname }}
+        --for=condition=Ready --timeout=5m
+      delegate_to: localhost
+      become: no
+      changed_when: false
+
+    - name: Uncordon node
+      command: kubectl uncordon {{ inventory_hostname }}
+      delegate_to: localhost
+      become: no
+
+    - name: containerd version now
+      command: containerd --version
+      register: containerd_after
+      changed_when: false
+
+    - name: Report
+      debug:
+        msg: "{{ containerd_before.stdout }} -> {{ containerd_after.stdout }}"

@@ -1,0 +1,26 @@
+# LINSTOR controller serves cluster state (nodes, pools, resources) on its API
+# port; drbd-reactor on each satellite exports the DRBD kernel state.
+apiVersion: operator.victoriametrics.com/v1beta1
+kind: VMPodScrape
+metadata:
+  name: linstor
+  namespace: piraeus-datastore
+  annotations:
+    argocd.argoproj.io/sync-options: SkipDryRunOnMissingResource=true
+spec:
+  selector:
+    matchExpressions:
+      - key: app.kubernetes.io/component
+        operator: In
+        values: [linstor-controller, linstor-satellite]
+  podMetricsEndpoints:
+    - port: api
+      path: /metrics
+      interval: 30s
+    - port: prometheus
+      path: /metrics
+      interval: 30s
+      relabelConfigs:
+        - action: replace
+          source_labels: [__meta_kubernetes_pod_node_name]
+          target_label: node

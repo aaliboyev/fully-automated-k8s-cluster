@@ -1,527 +1,332 @@
-# Kubernetes Cluster Bootstrap Guide
+# Bootstrapping the Cluster
 
-This guide provides step-by-step instructions for deploying a complete Kubernetes cluster from bare metal servers to a fully functional production environment.
+How to build the cluster from bare servers. Requirements, SSH setup and
+credentials are in [PREREQUISITES.md](PREREQUISITES.md); how the result is laid
+out is in [README.md](README.md).
 
 ## Table of Contents
 
-- [Prerequisites](#prerequisites)
-- [Phase 1: Base Infrastructure Setup](#phase-1-base-infrastructure-setup)
+- [Phase 1: Nodes and Base Layer](#phase-1-nodes-and-base-layer)
 - [Phase 2: ArgoCD-Managed Components](#phase-2-argocd-managed-components)
 - [Phase 3: Verification](#phase-3-verification)
 - [Customization](#customization)
+- [Scaling the Cluster](#scaling-the-cluster)
 - [Troubleshooting](#troubleshooting)
 
-## Prerequisites
+## Phase 1: Nodes and Base Layer
 
-### Hardware Requirements
-
-- **Control Plane Nodes**: Minimum 1 node (3 recommended for HA)
-  - 2 CPU cores
-  - 4GB RAM
-  - 50GB disk space
-
-- **Worker Nodes**: Minimum 3 nodes recommended
-  - 4 CPU cores
-  - 8GB RAM
-  - 100GB disk space
-  - Additional disk for Longhorn storage
-
-### Software Requirements
-
-- **Operating System**: Ubuntu 22.04 LTS or later
-- **Local Machine**: Ansible 2.10+ installed
-- **Network**: SSH key-based access to all nodes as root
-- **DNS**: Cloudflare-managed domain
-
-### Required Secrets
-
-Before deployment, you'll need to prepare the following credentials:
-
-#### 1. Cloudflare API Token
-
-Create a Cloudflare API token with the following permissions:
-- Zone: DNS: Edit
-- Zone: Zone: Read
-
-This token is used by:
-- `cert-manager` for Let's Encrypt DNS-01 challenges
-- `external-dns` for automatic DNS record management
-
-#### 2. Twingate Service Key
-
-If using Twingate for zero-trust access:
-- Create a connector in your Twingate dashboard
-- Generate service key tokens
-
-## Phase 1: Base Infrastructure Setup
+Playbooks run from `ansible/`; `ansible.cfg` sets the inventory and the root
+SSH user.
 
 ### Step 1: Prepare Server Nodes
 
-Run the initialization script on each bare metal node:
+Run the initialization script on each node:
 
 ```bash
-# SSH into each node and run:
-bash <(curl -s https://raw.githubusercontent.com/yourusername/your-repo/main/scripts/server-init.sh)
-
-# Or if you have the repository cloned locally:
-scp scripts/server-init.sh root@node-ip:/tmp/
-ssh root@node-ip 'bash /tmp/server-init.sh'
+scp scripts/server-init.sh root@<node>:/tmp/
+ssh root@<node> 'bash /tmp/server-init.sh'
 ```
 
-This script will:
-- Update system packages
-- Install and configure containerd runtime
-- Load required kernel modules (overlay, br_netfilter, iscsi_tcp)
-- Disable swap
-- Configure sysctl parameters for Kubernetes
+It installs base packages and containerd, loads `overlay` and `br_netfilter`,
+sets the forwarding sysctls and disables swap.
 
-### Step 2: Configure Ansible Inventory
+### Step 2: Configure the Inventory
 
-Edit `ansible/inventory.ini` to define your cluster topology:
+`ansible/inventory.ini` lists SSH aliases (see
+[PREREQUISITES.md](PREREQUISITES.md#ssh-configuration)):
 
 ```ini
 [control_plane]
-master1 ansible_host=192.168.1.10 ansible_user=root
-
-# For HA setup, add additional control planes:
-# master2 ansible_host=192.168.1.11 ansible_user=root
-# master3 ansible_host=192.168.1.12 ansible_user=root
+n1
 
 [workers]
-worker1 ansible_host=192.168.1.21 ansible_user=root
-worker2 ansible_host=192.168.1.22 ansible_user=root
-worker3 ansible_host=192.168.1.23 ansible_user=root
+n2
+n3
+n4
 
 [k8s:children]
 control_plane
 workers
 ```
 
-### Step 3: Verify Ansible Connectivity
-
-Test SSH connectivity to all nodes:
-
 ```bash
 cd ansible
 ansible all -m ping
-
-# Expected output:
-# master1 | SUCCESS => {...}
-# worker1 | SUCCESS => {...}
-# worker2 | SUCCESS => {...}
-# worker3 | SUCCESS => {...}
 ```
 
-### Step 4: Review Configuration Variables
+### Step 3: Review Variables
 
-Edit `ansible/group_vars/all.yml` if you need to customize versions:
+- `ansible/group_vars/all.yml`: `kubernetes_version`, `containerd_version`,
+  `cluster_name`, `pod_network_cidr`, `cilium_version`, `local_path_version`,
+  `argocd_chart_version`, firewall port lists, `node_health_urls`.
+- `ansible/cilium/values.yaml`: `k8sServiceHost` / `k8sServicePort` are how
+  Cilium agents reach the API server. With kube-proxy replaced there is no
+  `kubernetes` Service translation until Cilium runs, so this must be a name
+  that resolves to the control plane and is in the API server certificate
+  (kubeadm `controlPlaneEndpoint`). `devices` names the node interfaces.
 
-```yaml
-kubernetes_version: "v1.34"
-pod_network_cidr: "192.168.0.0/16"
-calico_version: "v3.31.2"
-longhorn_cli_version: "v1.10.1"
-longhorn_chart_version: "1.10.1"
-argocd_chart_version: "7.7.12"
-argocd_namespace: "argocd"
-```
-
-### Step 5: Deploy Base Infrastructure
-
-Deploy the entire base infrastructure with a single command:
+### Step 4: Deploy the Base Layer
 
 ```bash
-make ansible-init
+ansible-playbook playbooks/install-k8s.yml
+ansible-playbook playbooks/configure-sysctl.yml
+ansible-playbook playbooks/init-cluster.yml
+ansible-playbook playbooks/install-cilium.yml
+ansible-playbook playbooks/join-workers.yml
+ansible-playbook playbooks/install-local-path.yml
+ansible-playbook playbooks/install-argocd.yml
 ```
 
-This will execute the following playbooks in order:
-1. `install-k8s.yml` - Install Kubernetes components
-2. `init-cluster.yml` - Initialize the first control plane
-3. `install-calico.yml` - Deploy Calico CNI
-4. `install-longhorn.yml` - Deploy Longhorn storage
-5. `join-workers.yml` - Join worker nodes
-6. `install-argocd.yml` - Deploy ArgoCD
+- `install-k8s.yml` installs and holds kubeadm, kubelet and kubectl, plus
+  kernel headers for DRBD.
+- `configure-sysctl.yml` raises inotify and conntrack limits; see
+  [ansible/playbooks/README.md](ansible/playbooks/README.md#configure-sysctlyml).
+- `init-cluster.yml` runs `kubeadm init` without the kube-proxy addon and
+  merges the admin kubeconfig into the local `~/.kube/config`. Nodes stay
+  `NotReady` until Cilium is installed.
+- `install-cilium.yml` installs or upgrades Cilium from `ansible/cilium/` and
+  adds `cilium-proxy-rpcheck.service` on every node (Tailscale sets
+  `src_valid_mark`, which otherwise drops traffic Cilium hands to its proxy).
+- `install-local-path.yml` deploys `local-path` and `local-fast` (see
+  [components/local-path/README.md](components/local-path/README.md)).
 
-**Duration**: Approximately 15-20 minutes depending on your network and hardware.
+`make ansible-init` runs only `init-cluster.yml`.
 
-### Step 6: Configure Kubeconfig
-
-The kubeconfig file is automatically created on the first control plane node at `/root/.kube/config`.
-
-Copy it to your local machine:
+Then move every node to the pinned `containerd.io` (drains one node at a time):
 
 ```bash
-# From the control plane node
-scp root@master1:/root/.kube/config ~/.kube/config
-
-# Or use the helper script
-scp root@master1:/etc/kubernetes/admin.conf ~/.kube/config
+ansible-playbook playbooks/upgrade-containerd.yml
 ```
 
-Test cluster access:
+### Step 5: Prepare Replicated Storage Nodes
+
+Run `update-kernel.yml` on every node listed in `components/storage/values.yaml`.
+It installs the latest kernel with matching headers and reboots one node at a
+time; the LINSTOR satellite compiles DRBD 9 against those headers.
+
+```bash
+ansible-playbook playbooks/update-kernel.yml --limit <node>
+```
+
+### Step 6: Verify the Base Layer
 
 ```bash
 kubectl get nodes
-kubectl get pods -A
+kubectl -n kube-system get pods -l k8s-app=cilium
+kubectl -n kube-system exec ds/cilium -- cilium-dbg status --brief
+kubectl -n local-path-storage get pods
+kubectl -n argocd get pods
 ```
 
-### Step 7: Verify Base Components
+## Phase 2: ArgoCD-Managed Components
 
-Check that all base components are running:
+### Step 1: Enroll Nodes in the Tailnet
+
+Host enrollment is Ansible's job (see [TAILSCALE.md](TAILSCALE.md)):
 
 ```bash
-# Verify nodes are Ready
-kubectl get nodes
-
-# Check Calico pods
-kubectl get pods -n calico-system
-
-# Check Longhorn
-kubectl get pods -n longhorn-system
-
-# Check ArgoCD
-kubectl get pods -n argocd
+ansible-playbook playbooks/install-tailscale.yml -e tailscale_authkey=tskey-auth-...
 ```
 
-### Step 8: Get ArgoCD Admin Password
+### Step 2: Create Credential Secrets
+
+Credentials are never in git. Create them before the apps that read them sync:
+
+```bash
+kubectl create namespace network
+kubectl -n network create secret generic cloudflare-api-token \
+  --from-literal=api-token='<CLOUDFLARE_API_TOKEN>'
+
+kubectl create namespace tailscale
+kubectl -n tailscale create secret generic operator-oauth \
+  --from-literal=client_id=... --from-literal=client_secret=...
+```
+
+`components/flow-history/create-secrets.sh` creates the S3 credentials; apps
+with a `create-secrets.sh` in their directory need it run once. ArgoCD needs
+read access to the repository (see
+[PREREQUISITES.md](PREREQUISITES.md#github-ssh-key-for-gitops)).
+
+### Step 3: Install the Gateway API CRDs
+
+No app installs them; follow
+[components/network/README.md](components/network/README.md#gateway-api-crds).
+
+### Step 4: Apply the Root Application
+
+```bash
+kubectl apply -f bootstrap/root.yaml
+```
+
+The `root` Application applies every `apps/*/root.yaml` and
+`components/*/root.yaml`, and from then on applies any pushed change to them.
+It never prunes: to remove an app, delete its Application explicitly.
+
+```bash
+kubectl -n argocd get applications
+```
+
+### Step 5: Node Settings That Depend on Cluster Services
+
+If a Harbor registry with proxy-cache projects runs in the cluster, route
+image pulls through it:
+
+```bash
+ansible-playbook playbooks/configure-registry-mirrors.yml
+```
+
+Once kubectl works over the tailnet, close the cluster-internal ports:
+
+```bash
+ansible-playbook playbooks/configure-firewall.yml
+```
+
+Both are described in [ansible/playbooks/README.md](ansible/playbooks/README.md).
+
+## Phase 3: Verification
+
+```bash
+# All applications Synced and Healthy
+kubectl -n argocd get applications
+
+# Gateways Programmed, routes attached
+kubectl get gateway,httproute -A
+
+# Certificates Ready
+kubectl get certificate -A
+
+# Edge pods on the edge nodes
+kubectl -n network get pods -o wide
+```
+
+Private services (ArgoCD, Grafana, Hubble UI) answer only over the tailnet.
+The ArgoCD admin password:
 
 ```bash
 kubectl -n argocd get secret argocd-initial-admin-secret -o jsonpath="{.data.password}" | base64 -d && echo
 ```
 
-Save this password - you'll need it to access the ArgoCD UI.
-
-## Phase 2: ArgoCD-Managed Components
-
-### Step 1: Create Required Secrets
-
-Before applying root applications, create the necessary secrets.
-
-#### Create Cloudflare API Token Secret
-
-```bash
-kubectl create secret generic cloudflare-api-token \
-  --namespace=network \
-  --from-literal=api-token='YOUR_CLOUDFLARE_API_TOKEN'
-```
-
-**Note**: If the `network` namespace doesn't exist yet, create it first:
-
-```bash
-kubectl create namespace network
-```
-
-#### Create Twingate Service Key Secret
-
-```bash
-kubectl create secret generic twingate-service-key \
-  --namespace=network \
-  --from-literal=TWINGATE_ACCESS_TOKEN='YOUR_ACCESS_TOKEN' \
-  --from-literal=TWINGATE_REFRESH_TOKEN='YOUR_REFRESH_TOKEN'
-```
-
-### Step 2: Customize Configuration (Optional)
-
-If you want to use your own domain instead of `example.com`, edit the root application files:
-
-#### Edit Network Stack Configuration
-
-`components/network/root.yaml`:
-
-```yaml
-valuesObject:
-  domain: yourdomain.com  # Change this
-  email: admin@yourdomain.com  # Change this
-  externalDns:
-    txtOwnerId: your-infra  # Change this
-  repoURL: git@github.com:yourorg/your-repo.git  # Change this
-```
-
-#### Edit Observability Stack Configuration
-
-`components/observability/root.yaml`:
-
-```yaml
-valuesObject:
-  domain: yourdomain.com  # Change this
-  grafana:
-    subdomain: grafana
-  repoURL: git@github.com:yourorg/your-repo.git  # Change this
-```
-
-### Step 3: Apply Root Applications
-
-Deploy the ArgoCD-managed stacks:
-
-```bash
-# Create namespaces if they don't exist
-kubectl create namespace network --dry-run=client -o yaml | kubectl apply -f -
-kubectl create namespace observability --dry-run=client -o yaml | kubectl apply -f -
-
-# Apply network stack
-kubectl apply -f components/network/root.yaml
-
-# Apply observability stack
-kubectl apply -f components/observability/root.yaml
-```
-
-### Step 4: Monitor Deployment
-
-Watch ArgoCD sync the applications:
-
-```bash
-# View all applications
-kubectl get applications -n argocd
-
-# Watch application status
-watch kubectl get applications -n argocd
-
-# View detailed application info
-kubectl describe application network -n argocd
-kubectl describe application observability -n argocd
-```
-
-You can also access the ArgoCD UI to monitor deployment progress visually.
-
-## Phase 3: Verification
-
-### Verify All Applications are Synced
-
-```bash
-kubectl get applications -n argocd
-
-# All applications should show STATUS: Healthy and SYNC: Synced
-```
-
-### Verify Pods are Running
-
-```bash
-# Network stack
-kubectl get pods -n network
-
-# Observability stack
-kubectl get pods -n observability
-```
-
-### Verify Gateways and Routes
-
-```bash
-# Check gateways
-kubectl get gateway -A
-
-# Check HTTP routes
-kubectl get httproute -A
-
-# Verify external-dns created records
-kubectl logs -n network -l app.kubernetes.io/name=external-dns
-```
-
-### Verify TLS Certificates
-
-```bash
-# Check certificate resources
-kubectl get certificate -A
-
-# Check certificate status
-kubectl describe certificate public-wildcard-tls -n network
-
-# Certificates should show READY: True
-```
-
-### Access Services
-
-After DNS propagation (may take a few minutes), access your services:
-
-- **ArgoCD**: https://argocd.yourdomain.com
-- **Longhorn**: https://longhorn.yourdomain.com
-- **Grafana**: https://grafana.yourdomain.com
-
-**Note**: These services use the private gateway and require Twingate access or VPN connectivity.
-
 ## Customization
 
-### Changing Domain Names
+- Domains, hostnames, the ACME email, the external-dns owner ID and the edge
+  DNS name: `components/network/values.yaml`.
+- Grafana hostname: `components/observability/values.yaml`.
+- OIDC issuer and client IDs: `components/argocd/values.yaml` and
+  `components/observability/values/stack.yaml`.
+- Edge nodes: the node affinity in `components/network/values/haproxy-public.yaml`,
+  plus one A record per edge node under `publicEdgeHostname`.
+- Repository URL: `repoURL` in `bootstrap/root.yaml`, every `root.yaml` and the
+  component `values.yaml` files.
 
-1. Edit the `valuesObject` in `components/network/root.yaml` and `components/observability/root.yaml`
-2. Update the domain field
-3. Reapply the root applications:
+Push the change; the `root` Application and the component apps apply it.
 
-```bash
-kubectl apply -f components/network/root.yaml
-kubectl apply -f components/observability/root.yaml
-```
+### Adding an Application
 
-ArgoCD will automatically update all child resources with the new domain.
+Create `apps/<name>/root.yaml` holding an ArgoCD Application and push; `root`
+applies it. Public hosts use a Gateway of class `public-v2` with
+`external-dns.alpha.kubernetes.io/target: dns.example.com`; internal
+`*.example.com` hosts attach an HTTPRoute to `network/private`.
 
-### Adding Custom Applications
+## Scaling the Cluster
 
-To add your own applications managed by ArgoCD:
+### Add Worker Nodes
 
-1. Create application manifests in the `apps/` directory
-2. Create an ArgoCD Application resource pointing to your manifests
-3. Apply the Application resource to the cluster
+1. Run `scripts/server-init.sh` on the node and add it to `ansible/inventory.ini`
+   under `[workers]`.
+2. Install, tune and join it:
 
-Example:
+   ```bash
+   ansible-playbook playbooks/install-k8s.yml --limit <node>
+   ansible-playbook playbooks/configure-sysctl.yml --limit <node>
+   ansible-playbook playbooks/join-workers.yml --limit <node>
+   ansible-playbook playbooks/upgrade-containerd.yml --limit <node>
+   ansible-playbook playbooks/configure-registry-mirrors.yml --limit <node>
+   ansible-playbook playbooks/install-tailscale.yml --limit <node> -e tailscale_authkey=tskey-auth-...
+   ```
 
-```yaml
-apiVersion: argoproj.io/v1alpha1
-kind: Application
-metadata:
-  name: my-app
-  namespace: argocd
-spec:
-  project: default
-  source:
-    repoURL: git@github.com:yourorg/your-repo.git
-    targetRevision: main
-    path: apps/my-app
-  destination:
-    server: https://kubernetes.default.svc
-    namespace: my-app
-  syncPolicy:
-    automated:
-      prune: true
-      selfHeal: true
-```
+3. Run `configure-firewall.yml` on all nodes, not just the new one: every
+   node's address is in each node's trusted set.
+4. For replicated storage, follow
+   [components/storage/README.md](components/storage/README.md#joining-a-node).
 
-### Scaling the Cluster
+### Add Control Plane Nodes
 
-#### Add Worker Nodes
-
-1. Prepare new nodes with `scripts/server-init.sh`
-2. Add nodes to `ansible/inventory.ini` under `[workers]`
-3. Run playbooks:
-
-```bash
-ansible-playbook ansible/playbooks/install-k8s.yml --limit new_worker
-ansible-playbook ansible/playbooks/join-workers.yml --limit new_worker
-```
-
-#### Add Control Plane Nodes (HA)
-
-1. Prepare new nodes with `scripts/server-init.sh`
-2. Add nodes to `ansible/inventory.ini` under `[control_plane]`
-3. Run playbook:
-
-```bash
-ansible-playbook ansible/playbooks/promote-controlplane.yml
-```
+Add the node under `[control_plane]` and run
+`ansible-playbook playbooks/promote-controlplane.yml`.
 
 ## Troubleshooting
 
 ### ArgoCD Applications Not Syncing
 
 ```bash
-# Check application status
-kubectl describe application network -n argocd
-
-# Check ArgoCD controller logs
-kubectl logs -n argocd -l app.kubernetes.io/name=argocd-application-controller
-
-# Force sync via CLI
-argocd app sync network --force
+kubectl -n argocd describe application <app>
+kubectl -n argocd logs -l app.kubernetes.io/name=argocd-application-controller
 ```
 
 ### DNS Records Not Created
 
 ```bash
-# Check external-dns logs
-kubectl logs -n network -l app.kubernetes.io/name=external-dns
-
-# Verify Cloudflare credentials
-kubectl get secret cloudflare-api-token -n network -o yaml
-
-# Check external-dns service
-kubectl describe service external-dns -n network
+kubectl -n network logs -l app.kubernetes.io/name=external-dns
+kubectl -n network get secret cloudflare-api-token
 ```
+
+external-dns publishes about a minute after a route appears; lookups made
+before that may cache NXDOMAIN.
 
 ### TLS Certificates Not Issued
 
 ```bash
-# Check cert-manager logs
-kubectl logs -n network -l app.kubernetes.io/name=cert-manager
-
-# Check certificate status
-kubectl describe certificate -n network
-
-# Check certificate request
-kubectl get certificaterequest -n network
-
-# Check challenge status
+kubectl -n network logs -l app.kubernetes.io/name=cert-manager
+kubectl get certificate,certificaterequest -A
 kubectl get challenge -A
 ```
 
 ### Pods Not Starting
 
 ```bash
-# Check pod status
-kubectl get pods -A
-
-# Describe problematic pod
-kubectl describe pod <pod-name> -n <namespace>
-
-# Check pod logs
-kubectl logs <pod-name> -n <namespace>
-
-# Check events
-kubectl get events -n <namespace> --sort-by='.lastTimestamp'
+kubectl -n <namespace> describe pod <pod>
+kubectl -n <namespace> logs <pod>
+kubectl -n <namespace> get events --sort-by='.lastTimestamp'
 ```
 
-### Longhorn Issues
+### Storage Issues
 
 ```bash
-# Check Longhorn system pods
-kubectl get pods -n longhorn-system
+# Piraeus operator, controller, satellites, CSI
+kubectl get pods -n piraeus-datastore
 
-# Check Longhorn volumes
-kubectl get volumes -n longhorn-system
-
-# Run Longhorn preflight check
-longhornctl check preflight
-
-# Check node disk space
-kubectl get nodes -o wide
+# LINSTOR view of nodes, pools and volumes
+kubectl -n piraeus-datastore exec deploy/linstor-controller -- linstor node list
+kubectl -n piraeus-datastore exec deploy/linstor-controller -- linstor storage-pool list
+kubectl -n piraeus-datastore exec deploy/linstor-controller -- linstor resource list
 ```
+
+A satellite stuck in init usually means the DRBD module failed to build: check
+the `drbd-module-loader` init container logs and that the node has run
+`update-kernel.yml`.
 
 ### Network Connectivity Issues
 
 ```bash
-# Check Calico status
-kubectl get pods -n calico-system
+# Agent health and recent drops on one node
+kubectl -n kube-system get pods -l k8s-app=cilium -o wide
+kubectl -n kube-system exec <cilium-pod> -- cilium-dbg status
+kubectl -n kube-system exec <cilium-pod> -- hubble observe --verdict DROPPED --last 50
 
-# Check Calico node status
-kubectl get caliconodestatus -A
-
-# Test pod-to-pod connectivity
-kubectl run test-pod --image=busybox --rm -it -- sh
-# Inside pod: ping <other-pod-ip>
-
-# Check network policies
-kubectl get networkpolicy -A
+kubectl get networkpolicy,ciliumnetworkpolicy -A
 ```
 
-## Next Steps
-
-After successful bootstrap:
-
-1. **Configure Backups**: Set up Longhorn snapshot schedules
-2. **Enable Monitoring Alerts**: Configure alert rules in Victoria Metrics
-3. **Set Up CI/CD**: Configure GitHub Actions or GitLab CI to deploy to ArgoCD
-4. **Review Security**: Implement pod security policies, network policies
-5. **Document Runbooks**: Create operational procedures for your team
-
-## Support
-
-For issues or questions:
-- Check existing documentation in `ansible/playbooks/README*.md`
-- Review ArgoCD application status and logs
-- Check GitHub issues in the repository
+A node whose agent can't start loses contact with the others (they keep
+WireGuard peering to it); `kubectl delete ciliumnode <node>` clears that.
+Historical drops are in ClickHouse
+([components/flow-history/README.md](components/flow-history/README.md)).
 
 ## References
 
-- [Kubernetes Documentation](https://kubernetes.io/docs/)
-- [ArgoCD Documentation](https://argo-cd.readthedocs.io/)
-- [Calico Documentation](https://docs.tigera.io/calico/)
-- [Longhorn Documentation](https://longhorn.io/docs/)
-- [Traefik Documentation](https://doc.traefik.io/traefik/)
-- [cert-manager Documentation](https://cert-manager.io/docs/)
+- [Kubernetes](https://kubernetes.io/docs/)
+- [ArgoCD](https://argo-cd.readthedocs.io/)
+- [Cilium](https://docs.cilium.io/)
+- [Piraeus Datastore](https://piraeus.io/docs/)
+- [LINSTOR User Guide](https://linbit.com/drbd-user-guide/linstor-guide-1_0-en/)
+- [Traefik](https://doc.traefik.io/traefik/)
+- [cert-manager](https://cert-manager.io/docs/)

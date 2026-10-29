@@ -1,0 +1,54 @@
+---
+# =============================================================================
+# Kernel parameters every node needs, persisted in /etc/sysctl.d and applied live.
+# Usage: ansible-playbook -i inventory.ini playbooks/configure-sysctl.yml --limit node1
+#
+# inotify instances are counted per user, and nearly everything on a node runs as
+# root: kubelet, containerd's shims (2-3 each) and the LINSTOR satellite share the
+# default budget of 128. After a reboot every container starts at once, and the
+# satellite, which treats a failed watch as fatal, can lose that race and leave
+# the node's replicated volumes unattachable.
+#
+# conntrack: the 262,144-entry default fills during connection storms (every new
+# connection's DNS lookup lands in the table on the CoreDNS nodes), and a full
+# table drops new connections node-wide, the public edge's included. The module
+# is loaded at boot so systemd-sysctl can set its keys; hashsize matches the max.
+# =============================================================================
+- name: Configure kernel parameters
+  hosts: k8s
+  become: yes
+  gather_facts: no
+
+  vars:
+    sysctls:
+      fs.inotify.max_user_instances: 8192
+      fs.inotify.max_user_watches: 524288
+      net.netfilter.nf_conntrack_max: 1048576
+      net.netfilter.nf_conntrack_buckets: 1048576
+
+  tasks:
+    - name: Load nf_conntrack at boot
+      copy:
+        dest: /etc/modules-load.d/nf_conntrack.conf
+        mode: '0644'
+        content: "nf_conntrack\n"
+
+    - name: Size the conntrack hash table at module load
+      copy:
+        dest: /etc/modprobe.d/nf_conntrack.conf
+        mode: '0644'
+        content: "options nf_conntrack hashsize=1048576\n"
+
+    - name: Write /etc/sysctl.d/90-k8s-node.conf
+      copy:
+        dest: /etc/sysctl.d/90-k8s-node.conf
+        mode: '0644'
+        content: |
+          {% for key, value in sysctls.items() %}
+          {{ key }} = {{ value }}
+          {% endfor %}
+      register: sysctl_conf
+
+    - name: Apply kernel parameters
+      command: sysctl -p /etc/sysctl.d/90-k8s-node.conf
+      when: sysctl_conf.changed

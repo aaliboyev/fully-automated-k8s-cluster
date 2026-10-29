@@ -8,7 +8,7 @@ metadata:
 spec:
   project: default
   source:
-    repoURL: git@github.com:yourusername/your-repo.git
+    repoURL: git@github.com:your-org/your-infra-repo.git
     targetRevision: main
     path: components/observability
     helm:

@@ -1,0 +1,16 @@
+# Two diskful replicas; LINSTOR adds a diskless tiebreaker for quorum.
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: replicated
+  annotations:
+    argocd.argoproj.io/sync-wave: "2"
+    storageclass.kubernetes.io/is-default-class: "true"
+provisioner: linstor.csi.linbit.com
+allowVolumeExpansion: true
+reclaimPolicy: Retain
+volumeBindingMode: WaitForFirstConsumer
+parameters:
+  linstor.csi.linbit.com/storagePool: {{ .Values.storagePool }}
+  linstor.csi.linbit.com/placementCount: "2"
+  csi.storage.k8s.io/fstype: ext4

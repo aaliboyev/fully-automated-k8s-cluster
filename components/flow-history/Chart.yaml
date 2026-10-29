@@ -1,0 +1,5 @@
+apiVersion: v2
+name: flow-history
+description: Hubble flow history in ClickHouse, shipped from each node by Vector
+type: application
+version: 0.1.0

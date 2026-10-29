@@ -14,3 +14,5 @@ sources:
   - ingress
   - gateway-httproute
 txtPrefix: "_external-dns."
+# 0.22 changed the default annotation prefix; every manifest here uses this one.
+annotationPrefix: external-dns.alpha.kubernetes.io/

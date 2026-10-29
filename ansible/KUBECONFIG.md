@@ -23,7 +23,7 @@ The playbooks automatically manage your kubeconfig by:
 kubectl config get-contexts
 
 # Switch to on-prem cluster
-kubectl config use-context kubernetes-admin@kubernetes
+kubectl config use-context k8s-cluster
 
 # Switch to GKE cluster
 kubectl config use-context gke_codevalet_us-east5_dev-cluster
@@ -51,6 +51,33 @@ KUBECONFIG="$HOME/.kube/config:/path/to/new-cluster-config" \
   mv ~/.kube/config.tmp ~/.kube/config && \
   chmod 600 ~/.kube/config
 ```
+
+## Personal admin identity
+
+Daily access uses a personal client certificate bound to `cluster-admin` by
+username, so deleting its ClusterRoleBinding revokes it. kubeadm's
+`admin.conf` stays out of `~/.kube/config` as break-glass access.
+
+```bash
+openssl genpkey -algorithm ed25519 -out admin.key
+openssl req -new -key admin.key -subj "/CN=<user>" -out admin.csr
+kubectl apply -f - <<EOF
+apiVersion: certificates.k8s.io/v1
+kind: CertificateSigningRequest
+metadata: {name: <user>}
+spec:
+  request: $(base64 < admin.csr | tr -d '\n')
+  signerName: kubernetes.io/kube-apiserver-client
+  expirationSeconds: 31536000
+  usages: [client auth]
+EOF
+kubectl certificate approve <user>
+kubectl get csr <user> -o jsonpath='{.status.certificate}' | base64 -d > admin.crt
+kubectl create clusterrolebinding <user> --clusterrole=cluster-admin --user=<user>
+```
+
+CSR and binding names must be DNS-safe (e.g. `admin-example-com` for
+`admin@example.com`). Renew before expiry by repeating the CSR with the same key.
 
 ## Why Single Config?
 

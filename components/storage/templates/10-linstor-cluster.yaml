@@ -1,0 +1,61 @@
+apiVersion: piraeus.io/v1
+kind: LinstorCluster
+metadata:
+  name: linstorcluster
+  annotations:
+    argocd.argoproj.io/sync-wave: "1"
+    argocd.argoproj.io/sync-options: SkipDryRunOnMissingResource=true
+spec:
+  nodeAffinity:
+    nodeSelectorTerms:
+      - matchExpressions:
+          - key: kubernetes.io/hostname
+            operator: In
+            values:
+              {{- toYaml .Values.nodes | nindent 14 }}
+  nfsServer:
+    enabled: false
+---
+apiVersion: piraeus.io/v1
+kind: LinstorSatelliteConfiguration
+metadata:
+  name: storage-pool
+  annotations:
+    argocd.argoproj.io/sync-wave: "1"
+    argocd.argoproj.io/sync-options: SkipDryRunOnMissingResource=true
+spec:
+  storagePools:
+    - name: {{ .Values.storagePool }}
+      fileThinPool: {}
+---
+# Debian's headers symlink scripts/ into /usr/lib/linux-kbuild-*, outside the
+# loader's /usr/src mount: overlay the host /usr so the DRBD build finds them.
+apiVersion: piraeus.io/v1
+kind: LinstorSatelliteConfiguration
+metadata:
+  name: debian-kbuild
+  annotations:
+    argocd.argoproj.io/sync-wave: "1"
+    argocd.argoproj.io/sync-options: SkipDryRunOnMissingResource=true
+spec:
+  podTemplate:
+    spec:
+      initContainers:
+        - name: drbd-module-loader
+          command:
+            - sh
+            - -exc
+            - |
+              mount -t overlay overlay -olowerdir=/usr:/usr-host /usr
+              exec /entry.sh
+          securityContext:
+            privileged: true
+          volumeMounts:
+            - name: usr-host
+              mountPath: /usr-host
+              readOnly: true
+      volumes:
+        - name: usr-host
+          hostPath:
+            path: /usr
+            type: Directory

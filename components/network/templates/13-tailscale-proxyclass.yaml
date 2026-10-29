@@ -1,0 +1,15 @@
+# Default for every proxy the Tailscale operator creates. The portmapper's
+# UPnP/NAT-PMP probes find no router in a datacenter; their SSDP multicast only
+# shows up as Cilium drops.
+apiVersion: tailscale.com/v1alpha1
+kind: ProxyClass
+metadata:
+  name: datacenter
+  annotations:
+    argocd.argoproj.io/sync-wave: "2"
+spec:
+  statefulSet:
+    pod:
+      tailscaleContainer:
+        env:
+          - {name: TS_DISABLE_PORTMAPPER, value: "true"}

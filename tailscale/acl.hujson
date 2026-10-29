@@ -1,0 +1,35 @@
+// Tailnet policy. Apply: paste into the admin console ACL editor, or push via
+// the API once the OAuth client has the policy_file scope.
+//
+//   tag:node         — cluster hosts, enrolled by install-tailscale.yml
+//   tag:k8s-operator — the in-cluster Tailscale operator (service plane)
+// Untagged devices are tailnet members' own machines.
+{
+	"tagOwners": {
+		"tag:node":         ["autogroup:admin"],
+		"tag:k8s-operator": ["autogroup:admin"],
+		"tag:k8s":          ["tag:k8s-operator"],
+	},
+
+	"acls": [
+		// Members reach everything
+		{"action": "accept", "src": ["autogroup:member"], "dst": ["*:*"]},
+
+		// Nodes talk to each other freely (kubelet, etcd, overlay)
+		{"action": "accept", "src": ["tag:node"], "dst": ["tag:node:*"]},
+	],
+
+	// kubectl over the operator's API-server proxy: tailnet identity maps to
+	// cluster-admin via impersonation. Narrow src if members aren't all admins.
+	"grants": [
+		{
+			"src": ["autogroup:member"],
+			"dst": ["tag:k8s-operator"],
+			"app": {
+				"tailscale.com/cap/kubernetes": [
+					{"impersonate": {"groups": ["system:masters"]}},
+				],
+			},
+		},
+	],
+}
