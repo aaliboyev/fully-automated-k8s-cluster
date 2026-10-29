@@ -1,14 +1,40 @@
 # Fully Automated Kubernetes Cluster
 
-GitOps repository for a self-managed kubeadm cluster on VPS nodes. Ansible
-builds the nodes and everything ArgoCD itself depends on (Kubernetes, the CNI,
-local-path storage, ArgoCD). ArgoCD deploys everything else from `main`.
+Ansible and ArgoCD configuration for a kubeadm cluster on bare-metal or VPS
+nodes with no cloud load balancer. Ansible builds the nodes and everything
+ArgoCD depends on (Kubernetes, the CNI, local-path storage, ArgoCD); ArgoCD
+deploys the rest from `main`. It runs a production cluster of five Debian 13
+nodes.
 
-Domains, node names and repository URLs are placeholders (`example.com`,
-`node1`…`node5`, `your-org/your-infra-repo`); replace them before bootstrapping.
+What it sets up:
 
-To build a cluster from scratch: [PREREQUISITES.md](PREREQUISITES.md), then
-[BOOTSTRAP.md](BOOTSTRAP.md).
+- **Kubernetes** with kubeadm and containerd, without kube-proxy; rolling
+  playbooks for Kubernetes, containerd and kernel upgrades (kernel reboots wait
+  for replicated volumes to resync before the next node)
+- **Cilium** as the CNI and kube-proxy replacement, with WireGuard encryption
+  between nodes and Hubble flow history in ClickHouse
+- **Public edge** without a cloud load balancer: HAProxy Unified Gateway
+  (Gateway API) on the edge nodes' public IPs, cert-manager, external-dns
+  (Cloudflare)
+- **Private gateway** reachable only over Tailscale, for ArgoCD, Grafana and
+  other internal hosts; an nftables guard keeps the API server, etcd and
+  kubelet off the public internet
+- **Storage**: LINSTOR/DRBD replicated volumes (Piraeus operator) for data that
+  must survive a node loss, local-path for rebuildable data
+- **Observability**: VictoriaMetrics, VictoriaLogs, Grafana with generated
+  dashboards, Alertmanager, blackbox probes of public endpoints
+- **OIDC login** for ArgoCD and Grafana (configured for Zitadel, works with any
+  provider)
+
+## Quick start
+
+1. Prepare servers, DNS and credentials: [PREREQUISITES.md](PREREQUISITES.md).
+2. Replace the placeholders: `example.com`, `node1`…`node5` in
+   `ansible/inventory.ini` and the component values, and the repository URL
+   `your-org/your-infra-repo`
+   ([BOOTSTRAP.md](BOOTSTRAP.md#customization) lists where each one lives).
+3. Build the cluster: [BOOTSTRAP.md](BOOTSTRAP.md).
+4. Deploy workloads by adding `apps/<name>/root.yaml`.
 
 ## Cluster
 
@@ -145,7 +171,7 @@ Playbooks run from `ansible/`. Details: [ansible/playbooks/README.md](ansible/pl
 
 ## License
 
-MIT License
+[MIT](LICENSE)
 
 ## Author
 
